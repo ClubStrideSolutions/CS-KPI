@@ -1,0 +1,58 @@
+.nav-link { 
+    font-weight: 500; 
+}
+
+.account-dropdown { 
+    margin-left: auto; 
+}
+
+.card { 
+    transition: transform 0.2s;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.card:hover { 
+    transform: translateY(-5px); 
+}
+
+.stat-card { 
+    text-align: center; 
+}
+
+.stat-number { 
+    font-size: 2rem; 
+    font-weight: bold; 
+}
+
+.stat-label { 
+    color: #6c757d; 
+}
+
+.btn-primary { 
+    transition: all 0.2s; 
+}
+
+.btn-primary:hover { 
+    transform: translateY(-2px); 
+}
+
+.form-control:focus { 
+    border-color: #80bdff; 
+    box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25); 
+}
+
+.container {
+    padding: 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.input-field {
+    margin-bottom: 15px;
+}
+
+.alert {
+    margin-bottom: 20px;
+} 
