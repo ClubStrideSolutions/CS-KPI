@@ -3,7 +3,7 @@ from dash import Dash, html, dcc, Input, Output, State, no_update
 import dash_bootstrap_components as dbc
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask import Flask, send_from_directory, redirect, url_for, session, request, send_file, flash, jsonify
-import sqlite3
+from flask_sqlalchemy import SQLAlchemy
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import bcrypt
@@ -27,6 +27,21 @@ load_dotenv()
 # Initialize Flask app
 server = Flask(__name__)
 server.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
+server.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+server.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Initialize SQLAlchemy for PostgreSQL
+db = SQLAlchemy(server)
+
+# Initialize MongoDB connection
+mongo_uri = os.getenv('MONGO_URI')
+mongo_db_name = os.getenv('MONGO_DB')
+parsed_uri = urlparse(mongo_uri)
+if parsed_uri.scheme == 'mongodb+srv':
+    mongo_client = MongoClient(mongo_uri)
+else:
+    mongo_client = MongoClient(mongo_uri)
+mongo_db = mongo_client.get_database(mongo_db_name)
 
 # Add custom color scheme
 CUSTOM_COLORS = {
@@ -107,75 +122,46 @@ login_manager = LoginManager()
 login_manager.init_app(server)
 login_manager.login_view = 'login'
 
-# Configure SQLite connection
-db_path = 'kpi_platform.db'
+# User class for Flask-Login (using PostgreSQL)
+class User(UserMixin, db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+    role = db.Column(db.String(20), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-# Configure MongoDB connection
-mongo_uri = os.getenv('MONGO_URI')
-mongo_db_name = os.getenv('MONGO_DB')
-
-# Parse the MongoDB URI
-parsed_uri = urlparse(mongo_uri)
-if parsed_uri.scheme == 'mongodb+srv':
-    # For MongoDB Atlas connection
-    mongo_client = MongoClient(mongo_uri)
-else:
-    # For local MongoDB connection
-    mongo_client = MongoClient(mongo_uri)
-
-# Connect to the existing database
-mongo_db = mongo_client.get_database(mongo_db_name)
-
-# User class for Flask-Login
-class User(UserMixin):
-    def __init__(self, user_id, email, role):
-        self.id = user_id
+    def __init__(self, email, password, role='user'):
         self.email = email
+        self.password = password
         self.role = role
 
 @login_manager.user_loader
 def load_user(user_id):
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-        user_data = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        
-        if user_data:
-            return User(user_data['id'], user_data['email'], user_data['role'])
-        return None
-    except Exception as e:
-        print(f"Error loading user: {str(e)}")
-        return None
+    return User.query.get(int(user_id))
 
 # Create admin user if not exists
 def create_admin_user():
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
     admin_email = os.getenv('ADMIN_EMAIL')
     admin_password = os.getenv('ADMIN_PASSWORD')
     
     if admin_email and admin_password:
-        # Check if admin user exists
-        cursor.execute("SELECT * FROM users WHERE email = ?", (admin_email,))
-        if not cursor.fetchone():
+        admin = User.query.filter_by(email=admin_email).first()
+        if not admin:
             hashed_password = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt())
-            cursor.execute("""
-                INSERT INTO users (email, password, role)
-                VALUES (?, ?, 'admin')
-            """, (admin_email, hashed_password.decode('utf-8')))
-            conn.commit()
+            admin = User(
+                email=admin_email,
+                password=hashed_password.decode('utf-8'),
+                role='admin'
+            )
+            db.session.add(admin)
+            db.session.commit()
             print(f"Created admin user: {admin_email}")
-    
-    cursor.close()
-    conn.close()
 
-# Create admin user on startup
-create_admin_user()
+# Create database tables
+with server.app_context():
+    db.create_all()
+    create_admin_user()
 
 # Add login required decorator
 def login_required_dash(f):
@@ -371,24 +357,19 @@ def register_user(n_clicks, email, password, confirm_password):
     
     try:
         # Check if email already exists
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
-        if cursor.fetchone():
-            cursor.close()
-            conn.close()
+        existing_user = User.query.filter_by(email=email).first()
+        if existing_user:
             return html.Div("Email already registered", className="text-danger"), no_update
         
         # Hash password and create user
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        cursor.execute("""
-            INSERT INTO users (email, password, role)
-            VALUES (?, ?, 'user')
-        """, (email, hashed_password.decode('utf-8')))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        new_user = User(
+            email=email,
+            password=hashed_password.decode('utf-8'),
+            role='user'
+        )
+        db.session.add(new_user)
+        db.session.commit()
         
         return html.Div("Registration successful! Redirecting to login...", className="text-success"), "/login"
     
@@ -413,27 +394,18 @@ def login_callback(n_clicks, email, password):
         return html.Div("Please fill in all fields", className="text-danger"), no_update
     
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        user = User.query.filter_by(email=email).first()
         
-        cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
-        user = cursor.fetchone()
-        
-        if user and bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
-            user_obj = User(user['id'], user['email'], user['role'])
-            login_user(user_obj)
-            session['user_email'] = user['email']
-            session['user_role'] = user['role']
+        if user and bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
+            login_user(user)
+            session['user_email'] = user.email
+            session['user_role'] = user.role
             return html.Div("Login successful! Redirecting...", className="text-success"), "/"
         else:
             return html.Div("Invalid email or password", className="text-danger"), no_update
     except Exception as e:
         print(f"Login error: {str(e)}")
         return html.Div(f"Error during login: {str(e)}", className="text-danger"), no_update
-    finally:
-        cursor.close()
-        conn.close()
 
 # Callback for creating KPIs
 @app.callback(
