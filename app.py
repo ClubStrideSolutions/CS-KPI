@@ -1332,23 +1332,69 @@ def render_program_management():
                 dbc.Button("Cancel", id="edit-program-close", className="me-2", color="secondary"),
                 dbc.Button("Save Changes", id="save-program-edit", color="primary")
             ])
-        ], id="edit-program-modal", is_open=False)
+        ], id="edit-program-modal", is_open=False),
+
+        # Add Delete Program Confirmation Modal
+        dbc.Modal([
+            dbc.ModalHeader("Delete Program"),
+            dbc.ModalBody("Are you sure you want to delete this program? This will also delete all KPIs associated with it."),
+            dbc.ModalFooter([
+                dbc.Button("Cancel", id="delete-program-close", className="me-2", color="secondary"),
+                dbc.Button("Delete", id="confirm-program-delete", color="danger"),
+                dbc.Input(id="delete-program-id", type="hidden")
+            ])
+        ], id="delete-program-modal", is_open=False)
     ])
 
-# Add program management callbacks
+# Add callback to handle delete program modal
+@app.callback(
+    [Output("delete-program-modal", "is_open"),
+     Output("delete-program-id", "value")],
+    [Input({"type": "delete-program", "index": ALL}, "n_clicks"),
+     Input("delete-program-close", "n_clicks"),
+     Input("confirm-program-delete", "n_clicks")],
+    [State("delete-program-modal", "is_open")]
+)
+def toggle_delete_program_modal(delete_clicks, close_click, confirm_click, is_open):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return False, ""
+    
+    trigger_id = ctx.triggered[0]["prop_id"]
+    
+    if trigger_id == "delete-program-close.n_clicks":
+        return False, ""
+    
+    if trigger_id == "confirm-program-delete.n_clicks":
+        return False, ""
+    
+    if not any(delete_clicks):
+        raise PreventUpdate
+    
+    # Find which delete button was clicked
+    for i, clicks in enumerate(delete_clicks):
+        if clicks:
+            program_id = ctx.inputs_list[0][i]["id"]["index"]
+            return True, program_id
+    
+    raise PreventUpdate
+
+# Update the program management callback
 @app.callback(
     [Output("program-list", "children"),
      Output("program-name", "value"),
      Output("program-description", "value")],
     [Input("create-program-button", "n_clicks"),
-     Input("save-program-edit", "n_clicks")],
+     Input("save-program-edit", "n_clicks"),
+     Input("confirm-program-delete", "n_clicks")],  # Change to use confirm button
     [State("program-name", "value"),
      State("program-description", "value"),
      State("edit-program-name", "value"),
      State("edit-program-description", "value"),
-     State("edit-program-id", "value")]
+     State("edit-program-id", "value"),
+     State("delete-program-id", "value")]  # Add delete program ID state
 )
-def manage_programs(create_clicks, edit_clicks, name, description, edit_name, edit_description, edit_id):
+def manage_programs(create_clicks, edit_clicks, delete_clicks, name, description, edit_name, edit_description, edit_id, delete_id):
     ctx = dash.callback_context
     if not ctx.triggered:
         # Initial load - just display existing programs
@@ -1393,6 +1439,13 @@ def manage_programs(create_clicks, edit_clicks, name, description, edit_name, ed
                 {'_id': ObjectId(edit_id)},
                 {'$set': update}
             )
+    
+    # Handle program deletion
+    elif "confirm-program-delete" in trigger_id and delete_clicks and delete_id:
+        # Delete the program
+        mongo_db.programs.delete_one({"_id": ObjectId(delete_id)})
+        # Also delete any KPIs associated with this program
+        mongo_db.kpis.delete_many({"program_id": delete_id})
     
     # Return updated program list
     programs = list(mongo_db.programs.find().sort('created_at', -1))
