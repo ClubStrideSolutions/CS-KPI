@@ -656,348 +656,135 @@ def get_latest_metric_date(kpi_id):
 )
 def update_charts(selected_charts, selected_kpis, time_range, n_clicks, n_intervals):
     if not current_user.is_authenticated:
-        return html.Div("Please login to view charts", className="text-center p-4")
+        return html.Div("Please log in to view charts", className="text-center p-4")
     
     try:
-        # Get time range
+        # Get date range
         end_date = datetime.now()
         if time_range == "1w":
-            start_date = end_date - timedelta(weeks=1)
+            start_date = end_date - timedelta(days=7)
         elif time_range == "1m":
             start_date = end_date - timedelta(days=30)
         elif time_range == "3m":
             start_date = end_date - timedelta(days=90)
-        else:
-            start_date = end_date - timedelta(days=7)
+        elif time_range == "ytd":
+            start_date = datetime(end_date.year, 1, 1)
+        else:  # all
+            start_date = datetime(2000, 1, 1)  # Far past date
         
-        # Get selected KPIs
+        # Get KPIs
         if not selected_kpis:
-            return html.Div("Please select at least one KPI to visualize", className="text-center p-4")
+            return html.Div("Please select at least one KPI", className="text-center p-4")
         
-        kpis = list(mongo_db.kpis.find({"_id": {"$in": [ObjectId(kpi_id) for kpi_id in selected_kpis]}}))
+        kpis = []
+        for kpi_id in selected_kpis:
+            kpi = mongo_db.kpis.find_one({"_id": ObjectId(kpi_id)})
+            if kpi:
+                kpis.append(kpi)
         
         if not kpis:
             return html.Div("No KPIs found", className="text-center p-4")
         
         charts = []
         
-        # Performance Over Time
-        if "performance" in selected_charts:
-            fig = go.Figure()
-            for kpi in kpis:
-                metrics = list(mongo_db.kpi_metrics.find({
-                    "kpi_id": str(kpi["_id"]),
-                    "date": {"$gte": start_date, "$lte": end_date}
-                }).sort("date", 1))
-                
-                if not metrics:
-                    continue
-                
-                fig.add_trace(go.Scatter(
-                    x=[m["date"] for m in metrics],
-                    y=[m["value"] for m in metrics],
-                    mode='lines+markers',
-                    name=kpi["name"],
-                    line=dict(color='blue')
-                ))
-            
-            fig.update_layout(
-                title="KPI Performance Over Time",
-                xaxis_title="Date",
-                yaxis_title="Value",
+        # Helper function to get metrics for a KPI
+        def get_kpi_metrics(kpi_id, start_date, end_date):
+            return list(mongo_db.kpi_metrics.find({
+                "kpi_id": str(kpi_id),
+                "date": {"$gte": start_date, "$lte": end_date}
+            }).sort("date", 1))
+        
+        # Helper function to create a basic chart layout
+        def create_basic_layout(title, xaxis_title, yaxis_title):
+            return dict(
+                title=title,
+                xaxis_title=xaxis_title,
+                yaxis_title=yaxis_title,
                 showlegend=True,
                 height=400,
                 margin=dict(l=50, r=50, t=50, b=50)
             )
+        
+        # Line Chart
+        if "line" in selected_charts:
+            fig = go.Figure()
+            for kpi in kpis:
+                metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
+                if metrics:
+                    fig.add_trace(go.Scatter(
+                        x=[m["date"] for m in metrics],
+                        y=[m["value"] for m in metrics],
+                        mode='lines+markers',
+                        name=kpi["name"]
+                    ))
+            fig.update_layout(create_basic_layout("KPI Trends", "Date", "Value"))
+            charts.append(dcc.Graph(figure=fig))
+        
+        # Bar Chart
+        if "bar" in selected_charts:
+            fig = go.Figure()
+            for kpi in kpis:
+                metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
+                if metrics:
+                    fig.add_trace(go.Bar(
+                        x=[m["date"] for m in metrics],
+                        y=[m["value"] for m in metrics],
+                        name=kpi["name"]
+                    ))
+            fig.update_layout(create_basic_layout("KPI Values", "Date", "Value"))
             charts.append(dcc.Graph(figure=fig))
         
         # Target vs Actual
         if "target" in selected_charts:
             fig = go.Figure()
             for kpi in kpis:
-                metrics = list(mongo_db.kpi_metrics.find({
-                    "kpi_id": str(kpi["_id"]),
-                    "date": {"$gte": start_date, "$lte": end_date}
-                }).sort("date", 1))
-                
-                if not metrics:
-                    continue
-                
-                fig.add_trace(go.Scatter(
-                    x=[start_date, end_date],
-                    y=[kpi["target"], kpi["target"]],
-                    mode='lines',
-                    name=f'{kpi["name"]} Target',
-                    line=dict(color='red', dash='dash')
-                ))
-                fig.add_trace(go.Scatter(
-                    x=[m["date"] for m in metrics],
-                    y=[m["value"] for m in metrics],
-                    mode='lines+markers',
-                    name=f'{kpi["name"]} Actual',
-                    line=dict(color='blue')
-                ))
-            
-            fig.update_layout(
-                title="Target vs Actual Comparison",
-                xaxis_title="Date",
-                yaxis_title="Value",
-                showlegend=True,
-                height=400,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
+                metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
+                if metrics:
+                    fig.add_trace(go.Scatter(
+                        x=[start_date, end_date],
+                        y=[kpi["target"], kpi["target"]],
+                        mode='lines',
+                        name=f'{kpi["name"]} Target',
+                        line=dict(color='red', dash='dash')
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=[m["date"] for m in metrics],
+                        y=[m["value"] for m in metrics],
+                        mode='lines+markers',
+                        name=f'{kpi["name"]} Actual',
+                        line=dict(color='blue')
+                    ))
+            fig.update_layout(create_basic_layout("Target vs Actual Comparison", "Date", "Value"))
             charts.append(dcc.Graph(figure=fig))
-        
-        # Category Distribution
-        if "category" in selected_charts:
-            category_data = {}
-            for kpi in kpis:
-                category = kpi.get("category", "Uncategorized")
-                if category not in category_data:
-                    category_data[category] = 0
-                category_data[category] += 1
-            
-            fig = go.Figure(data=[
-                go.Pie(
-                    labels=list(category_data.keys()),
-                    values=list(category_data.values()),
-                    hole=.3
-                )
-            ])
-            
-            fig.update_layout(
-                title="KPI Distribution by Category",
-                height=400,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
-            charts.append(dcc.Graph(figure=fig))
-        
-        # KPI Gauges
-        if "gauges" in selected_charts:
-            for kpi in kpis:
-                latest_metric = mongo_db.kpi_metrics.find_one(
-                    {"kpi_id": str(kpi["_id"])},
-                    sort=[("date", -1)]
-                )
-                
-                if not latest_metric:
-                    continue
-                
-                current_value = latest_metric["value"]
-                target = kpi["target"]
-                initial_value = kpi.get("initial_value", 0)
-                
-                # Calculate percentage based on metric type
-                if kpi.get("metric_type") == "percentage":
-                    percentage = min(current_value, 100)
-                else:
-                    # For other types, calculate progress from initial to target
-                    if target > initial_value:
-                        percentage = min(((current_value - initial_value) / (target - initial_value)) * 100, 100)
-                    else:
-                        percentage = min(((initial_value - current_value) / (initial_value - target)) * 100, 100)
-                
-                # Format the value based on metric type
-                value_format = {
-                    "percentage": "%",
-                    "currency": "$",
-                    "time": " hrs",
-                    "number": ""
-                }.get(kpi.get("metric_type", "number"), "")
-                
-                fig = go.Figure(go.Indicator(
-                    mode="gauge+number+delta",
-                    value=current_value,
-                    delta={'reference': initial_value},
-                    title={'text': f"{kpi['name']} Progress"},
-                    number={'suffix': value_format},
-                    gauge={
-                        'axis': {'range': [0, 100]},
-                        'bar': {'color': "darkblue"},
-                        'steps': [
-                            {'range': [0, 50], 'color': "red"},
-                            {'range': [50, 80], 'color': "yellow"},
-                            {'range': [80, 100], 'color': "green"}
-                        ],
-                        'threshold': {
-                            'line': {'color': "red", 'width': 4},
-                            'thickness': 0.75,
-                            'value': 90
-                        }
-                    }
-                ))
-                
-                fig.update_layout(
-                    height=400,
-                    margin=dict(l=50, r=50, t=50, b=50),
-                    annotations=[{
-                        'text': f'Target: {target}{value_format}',
-                        'showarrow': False,
-                        'x': 0.5,
-                        'y': -0.1
-                    }]
-                )
-                charts.append(dcc.Graph(figure=fig))
         
         # Monthly Trends
         if "trends" in selected_charts:
             fig = go.Figure()
             for kpi in kpis:
-                metrics = list(mongo_db.kpi_metrics.find({
-                    "kpi_id": str(kpi["_id"]),
-                    "date": {"$gte": start_date, "$lte": end_date}
-                }).sort("date", 1))
-                
-                if not metrics:
-                    continue
-                
-                monthly_data = {}
-                for metric in metrics:
-                    month_key = metric["date"].strftime("%Y-%m")
-                    if month_key not in monthly_data:
-                        monthly_data[month_key] = []
-                    monthly_data[month_key].append(metric["value"])
-                
-                months = []
-                averages = []
-                for month, values in sorted(monthly_data.items()):
-                    months.append(month)
-                    averages.append(sum(values) / len(values))
-                
-                fig.add_trace(go.Bar(
-                    x=months,
-                    y=averages,
-                    name=kpi["name"]
-                ))
-            
-            fig.update_layout(
-                title="Monthly Trends",
-                xaxis_title="Month",
-                yaxis_title="Average Value",
-                showlegend=True,
-                height=400,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
+                metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
+                if metrics:
+                    monthly_data = {}
+                    for metric in metrics:
+                        month_key = metric["date"].strftime("%Y-%m")
+                        if month_key not in monthly_data:
+                            monthly_data[month_key] = []
+                        monthly_data[month_key].append(metric["value"])
+                    
+                    months = []
+                    averages = []
+                    for month, values in sorted(monthly_data.items()):
+                        months.append(month)
+                        averages.append(sum(values) / len(values))
+                    
+                    fig.add_trace(go.Bar(
+                        x=months,
+                        y=averages,
+                        name=kpi["name"]
+                    ))
+            fig.update_layout(create_basic_layout("Monthly Trends", "Month", "Average Value"))
             charts.append(dcc.Graph(figure=fig))
         
-        # Achievement Rate
-        if "achievement" in selected_charts:
-            achievement_data = {}
-            for kpi in kpis:
-                metrics = list(mongo_db.kpi_metrics.find({
-                    "kpi_id": str(kpi["_id"]),
-                    "date": {"$gte": start_date, "$lte": end_date}
-                }).sort("date", 1))
-                
-                if not metrics:
-                    continue
-                
-                target = kpi["target"]
-                achieved = sum(1 for m in metrics if m["value"] >= target)
-                total = len(metrics)
-                achievement_rate = (achieved / total * 100) if total > 0 else 0
-                
-                achievement_data[kpi["name"]] = achievement_rate
-            
-            fig = go.Figure(data=[
-                go.Bar(
-                    x=list(achievement_data.keys()),
-                    y=list(achievement_data.values()),
-                    text=[f"{v:.1f}%" for v in achievement_data.values()],
-                    textposition='auto',
-                )
-            ])
-            
-            fig.update_layout(
-                title="KPI Achievement Rates",
-                xaxis_title="KPI",
-                yaxis_title="Achievement Rate (%)",
-                height=400,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
-            charts.append(dcc.Graph(figure=fig))
-        
-        # Progress Tracking
-        if "progress" in selected_charts:
-            for kpi in kpis:
-                metrics = list(mongo_db.kpi_metrics.find({
-                    "kpi_id": str(kpi["_id"]),
-                    "date": {"$gte": start_date, "$lte": end_date}
-                }).sort("date", 1))
-                
-                if not metrics:
-                    continue
-                
-                initial_value = kpi.get("initial_value", 0)
-                current_value = metrics[-1]["value"] if metrics else initial_value
-                target = kpi["target"]
-                
-                progress = ((current_value - initial_value) / (target - initial_value)) * 100 if target != initial_value else 0
-                
-                fig = go.Figure(go.Indicator(
-                    mode="number+delta",
-                    value=current_value,
-                    delta={'reference': initial_value},
-                    title={'text': f"{kpi['name']} Progress"},
-                    number={'suffix': "%" if kpi.get("metric_type") == "percentage" else ""}
-                ))
-                
-                fig.update_layout(
-                    height=400,
-                    margin=dict(l=50, r=50, t=50, b=50)
-                )
-                charts.append(dcc.Graph(figure=fig))
-        
-        # Status Overview
-        if "status" in selected_charts:
-            status_data = {
-                "On Target": 0,
-                "At Risk": 0,
-                "Off Target": 0
-            }
-            
-            for kpi in kpis:
-                latest_metric = mongo_db.kpi_metrics.find_one(
-                    {"kpi_id": str(kpi["_id"])},
-                    sort=[("date", -1)]
-                )
-                
-                if not latest_metric:
-                    continue
-                
-                current_value = latest_metric["value"]
-                target = kpi["target"]
-                
-                if current_value >= target:
-                    status_data["On Target"] += 1
-                elif current_value >= target * 0.8:
-                    status_data["At Risk"] += 1
-                else:
-                    status_data["Off Target"] += 1
-            
-            fig = go.Figure(data=[
-                go.Bar(
-                    x=list(status_data.keys()),
-                    y=list(status_data.values()),
-                    text=list(status_data.values()),
-                    textposition='auto',
-                    marker_color=['green', 'orange', 'red']
-                )
-            ])
-            
-            fig.update_layout(
-                title="KPI Status Overview",
-                xaxis_title="Status",
-                yaxis_title="Number of KPIs",
-                height=400,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
-            charts.append(dcc.Graph(figure=fig))
-        
-        if not charts:
-            return html.Div("No data available for the selected time range", className="text-center p-4")
-        
-        return html.Div(charts, className="mt-4")
+        return html.Div(charts)
     
     except Exception as e:
         print(f"Error updating charts: {str(e)}")
@@ -1582,28 +1369,7 @@ def render_program_management():
     [State("delete-program-modal", "is_open")]
 )
 def toggle_delete_program_modal(delete_clicks, close_click, confirm_click, is_open):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return False, ""
-    
-    trigger_id = ctx.triggered[0]["prop_id"]
-    
-    if trigger_id == "delete-program-close.n_clicks":
-        return False, ""
-    
-    if trigger_id == "confirm-program-delete.n_clicks":
-        return False, ""
-    
-    if not any(delete_clicks):
-        raise PreventUpdate
-    
-    # Find which delete button was clicked
-    for i, clicks in enumerate(delete_clicks):
-        if clicks:
-            program_id = ctx.inputs_list[0][i]["id"]["index"]
-            return True, program_id
-    
-    raise PreventUpdate
+    return toggle_modal(delete_clicks, "delete-program-close", "confirm-program-delete", is_open)
 
 # Update the program management callback
 @app.callback(
@@ -2160,29 +1926,7 @@ def render_kpi_dashboard():
     [State("edit-program-modal", "is_open")]
 )
 def toggle_edit_program_modal(edit_clicks, close_click, save_click, is_open):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return False, "", "", ""
-    
-    trigger_id = ctx.triggered[0]["prop_id"]
-    
-    if trigger_id == "edit-program-close.n_clicks" or trigger_id == "save-program-edit.n_clicks":
-        return False, "", "", ""
-    
-    if not any(edit_clicks):
-        raise PreventUpdate
-    
-    # Find which edit button was clicked
-    for i, clicks in enumerate(edit_clicks):
-        if clicks:
-            # Get the program ID from the button's index
-            program_id = ctx.inputs_list[0][i]["id"]["index"]
-            # Fetch program data from MongoDB
-            program = mongo_db.programs.find_one({"_id": ObjectId(program_id)})
-            if program:
-                return True, program.get("name", ""), program.get("description", ""), program_id
-    
-    raise PreventUpdate
+    return toggle_modal(edit_clicks, "edit-program-close", "save-program-edit", is_open)
 
 # Add user management page
 def render_user_management():
@@ -2294,43 +2038,7 @@ def render_user_management():
     prevent_initial_call=True
 )
 def toggle_delete_user_modal(delete_clicks, close_click, confirm_click, is_open, user_id):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return False, "", create_user_table(User.query.all())
-    
-    trigger_id = ctx.triggered[0]["prop_id"]
-    
-    if trigger_id == "delete-user-close.n_clicks":
-        return False, "", create_user_table(User.query.all())
-    
-    if trigger_id == "confirm-delete-user.n_clicks":
-        try:
-            user = User.query.get(user_id)
-            if user:
-                # Don't allow deleting the last admin
-                if user.role == 'admin':
-                    admin_count = User.query.filter_by(role='admin').count()
-                    if admin_count <= 1:
-                        return False, "", create_user_table(User.query.all())
-                
-                db.session.delete(user)
-                db.session.commit()
-                # Return updated user list immediately
-                return False, "", create_user_table(User.query.all())
-        except Exception as e:
-            print(f"Error deleting user: {str(e)}")
-        return False, "", create_user_table(User.query.all())
-    
-    if not any(delete_clicks):
-        raise PreventUpdate
-    
-    # Find which delete button was clicked
-    for i, clicks in enumerate(delete_clicks):
-        if clicks:
-            user_id = ctx.inputs_list[0][i]["id"]["index"]
-            return True, user_id, create_user_table(User.query.all())
-    
-    raise PreventUpdate
+    return toggle_modal(delete_clicks, "delete-user-close", "confirm-delete-user", is_open)
 
 # Update user list callback to handle other actions
 @app.callback(
@@ -2409,37 +2117,7 @@ def create_user_table(users):
     prevent_initial_call=True
 )
 def toggle_reset_password_modal(reset_clicks, close_click, confirm_click, is_open, new_password, confirm_password, user_id):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return False, "", "", ""
-    
-    trigger_id = ctx.triggered[0]["prop_id"]
-    
-    if trigger_id == "reset-password-close.n_clicks":
-        return False, "", "", ""
-    
-    if trigger_id == "confirm-reset-password.n_clicks":
-        if new_password and confirm_password and new_password == confirm_password:
-            try:
-                user = User.query.get(user_id)
-                if user:
-                    hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
-                    user.password = hashed_password.decode('utf-8')
-                    db.session.commit()
-            except Exception as e:
-                print(f"Error resetting password: {str(e)}")
-        return False, "", "", ""
-    
-    if not any(reset_clicks):
-        raise PreventUpdate
-    
-    # Find which reset button was clicked
-    for i, clicks in enumerate(reset_clicks):
-        if clicks:
-            user_id = ctx.inputs_list[0][i]["id"]["index"]
-            return True, user_id, "", ""
-    
-    raise PreventUpdate
+    return toggle_modal(reset_clicks, "reset-password-close", "confirm-reset-password", is_open)
 
 # Add callback for creating new users
 @app.callback(
@@ -2490,12 +2168,12 @@ def create_user(n_clicks, email, password, role):
 
 # Add callback for update value modal
 @app.callback(
-    [Output("update-value-modal", "is_open"),
-     Output("update-value-kpi-id", "value"),
-     Output("update-value-kpi-name", "children"),
-     Output("update-kpi-value", "value"),
-     Output("update-kpi-date", "value"),
-     Output("update-kpi-comment", "value")],
+    [Output("update-value-modal", "is_open", allow_duplicate=True),
+     Output("update-value-kpi-id", "value", allow_duplicate=True),
+     Output("update-value-kpi-name", "children", allow_duplicate=True),
+     Output("update-kpi-value", "value", allow_duplicate=True),
+     Output("update-kpi-date", "value", allow_duplicate=True),
+     Output("update-kpi-comment", "value", allow_duplicate=True)],
     [Input({"type": "update-value", "index": ALL}, "n_clicks"),
      Input("update-value-modal-close", "n_clicks"),
      Input("save-kpi-value", "n_clicks")],
@@ -2509,86 +2187,90 @@ def create_user(n_clicks, email, password, role):
 def toggle_update_value_modal(update_clicks, close_click, save_click, is_open, new_value, update_date, comment, kpi_id):
     ctx = dash.callback_context
     if not ctx.triggered:
-        return False, "", "", "", "", ""
-    
+        raise PreventUpdate
+        
     trigger_id = ctx.triggered[0]["prop_id"]
     
-    if trigger_id == "update-value-modal-close.n_clicks":
+    if "update-value-modal-close" in trigger_id or "save-kpi-value" in trigger_id:
         return False, "", "", "", "", ""
-    
-    if trigger_id == "save-kpi-value.n_clicks":
-        if new_value and update_date and kpi_id and comment:
-            try:
-                # Insert new metric value
-                metric_data = {
-                    "kpi_id": kpi_id,
-                    "user_id": current_user.id,
-                    "value": float(new_value),
-                    "date": datetime.strptime(update_date, "%Y-%m-%d")
-                }
-                mongo_db.kpi_metrics.insert_one(metric_data)
-                
-                # Add to history with comment
-                kpi = mongo_db.kpis.find_one({"_id": ObjectId(kpi_id)})
-                if kpi:
-                    history_data = {
-                        "kpi_id": kpi_id,
-                        "user_id": current_user.id,
-                        "kpi_name": kpi["name"],
-                        "action": "update",
-                        "comment": f"Updated value to {new_value}. Comment: {comment}",
-                        "date": datetime.now()
-                    }
-                    mongo_db.kpi_history.insert_one(history_data)
-            except Exception as e:
-                print(f"Error updating KPI value: {str(e)}")
-        return False, "", "", "", "", ""
-    
+        
     if not any(update_clicks):
         raise PreventUpdate
-    
-    # Find which update button was clicked
+        
+    # Find which button was clicked
     for i, clicks in enumerate(update_clicks):
         if clicks:
-            kpi_id = ctx.inputs_list[0][i]["id"]["index"]
-            # Fetch KPI data from MongoDB
-            kpi = mongo_db.kpis.find_one({"_id": ObjectId(kpi_id)})
+            item_id = update_clicks[i]["id"]["index"]
+            kpi = mongo_db.kpis.find_one({"_id": ObjectId(item_id)})
             if kpi:
-                return True, kpi_id, f"Update value for: {kpi['name']}", "", datetime.now().strftime("%Y-%m-%d"), ""
-    
+                return True, item_id, kpi["name"], "", datetime.now().strftime("%Y-%m-%d"), ""
+            
     raise PreventUpdate
 
-# Add caching for frequently accessed data
+# Add utility functions for data fetching
+def get_kpi_data(kpi_id=None, user_id=None, is_admin=False, start_date=None, end_date=None):
+    """Get KPI data with optional filtering"""
+    query = {}
+    if kpi_id:
+        query["_id"] = ObjectId(kpi_id)
+    if not is_admin and user_id:
+        query["user_id"] = str(user_id)
+    
+    kpis = list(mongo_db.kpis.find(query).sort('created_at', -1))
+    
+    if start_date and end_date:
+        for kpi in kpis:
+            kpi["metrics"] = list(mongo_db.kpi_metrics.find({
+                "kpi_id": str(kpi["_id"]),
+                "date": {"$gte": start_date, "$lte": end_date}
+            }).sort("date", 1))
+    
+    return kpis
+
+def get_user_data(user_id=None):
+    """Get user data with optional filtering"""
+    query = {}
+    if user_id:
+        query["id"] = user_id
+    return User.query.filter_by(**query).all()
+
+def get_program_data(program_id=None):
+    """Get program data with optional filtering"""
+    query = {}
+    if program_id:
+        query["_id"] = ObjectId(program_id)
+    return list(mongo_db.programs.find(query).sort('created_at', -1))
+
+def get_metric_data(kpi_id, start_date=None, end_date=None):
+    """Get metric data for a KPI with optional date filtering"""
+    query = {"kpi_id": str(kpi_id)}
+    if start_date and end_date:
+        query["date"] = {"$gte": start_date, "$lte": end_date}
+    return list(mongo_db.kpi_metrics.find(query).sort("date", 1))
+
+def get_history_data(kpi_id=None, user_id=None, start_date=None, end_date=None):
+    """Get history data with optional filtering"""
+    query = {}
+    if kpi_id:
+        query["kpi_id"] = str(kpi_id)
+    if user_id:
+        query["user_id"] = str(user_id)
+    if start_date and end_date:
+        query["date"] = {"$gte": start_date, "$lte": end_date}
+    return list(mongo_db.kpi_history.find(query).sort("date", -1))
+
+# Update existing functions to use the utility functions
 @lru_cache(maxsize=128)
 def get_cached_kpis(user_id=None, is_admin=False):
     """Cached function to get KPIs with a 5-minute cache duration"""
-    if is_admin:
-        return list(mongo_db.kpis.find().sort('created_at', -1))
-    else:
-        return list(mongo_db.kpis.find({"user_id": str(user_id)}).sort('created_at', -1))
+    return get_kpi_data(user_id=user_id, is_admin=is_admin)
 
 @lru_cache(maxsize=128)
 def get_cached_metrics(kpi_id):
     """Cached function to get metrics for a KPI"""
-    return list(mongo_db.kpi_metrics.find({"kpi_id": kpi_id}).sort("date", -1))
+    return get_metric_data(kpi_id)
 
-# Add a helper function to convert MongoDB documents to JSON-serializable format
-def convert_to_json_serializable(docs):
-    """Convert MongoDB documents to JSON-serializable format"""
-    serializable_docs = []
-    for doc in docs:
-        serializable_doc = {}
-        for key, value in doc.items():
-            if isinstance(value, ObjectId):
-                serializable_doc[key] = str(value)
-            elif isinstance(value, datetime):
-                serializable_doc[key] = value.isoformat()
-            else:
-                serializable_doc[key] = value
-        serializable_docs.append(serializable_doc)
-    return serializable_docs
-
-# Update the update_kpi_list callback
+# Update callbacks to use the utility functions
 @app.callback(
     [Output("kpi-list", "children"),
      Output("kpi-data-store", "data")],
@@ -2628,80 +2310,79 @@ def update_kpi_list(edit_clicks, delete_clicks, update_value_clicks, n_intervals
         if not needs_update and stored_data:
             kpis = stored_data
         else:
-            kpis = get_cached_kpis(
+            kpis = get_kpi_data(
                 user_id=current_user.id if not current_user.role == 'admin' else None,
                 is_admin=current_user.role == 'admin'
             )
         
         if not ctx.triggered:
             return create_kpi_table(kpis), convert_to_json_serializable(kpis)
-            
+        
+        # Handle different actions
         trigger_id = ctx.triggered[0]["prop_id"]
         
-        # Handle KPI edit
-        if trigger_id == "save-kpi-edit.n_clicks" and edit_clicks:
-            if edit_id and name and description and category and target:
-                try:
-                    mongo_db.kpis.update_one(
-                        {"_id": ObjectId(edit_id)},
-                        {
-                            "$set": {
-                                "name": name,
-                                "description": description,
-                                "category": category,
-                                "target": float(target),
-                                "updated_at": datetime.now()
-                            }
-                        }
-                    )
-                    # Add to history
-                    mongo_db.kpi_history.insert_one({
-                        "kpi_id": edit_id,
-                        "user_id": str(current_user.id),
-                        "kpi_name": name,
-                        "action": "update",
-                        "comment": f"KPI updated with new target: {target}",
-                        "date": datetime.now()
-                    })
-                except Exception as e:
-                    print(f"Error updating KPI: {str(e)}")
-                    return html.Div(f"Error updating KPI: {str(e)}", className="text-danger"), stored_data
-        
-        # Handle KPI delete
-        elif trigger_id == "confirm-kpi-delete.n_clicks" and delete_clicks:
-            if delete_id:
-                try:
-                    mongo_db.kpis.delete_one({"_id": ObjectId(delete_id)})
-                    mongo_db.kpi_metrics.delete_many({"kpi_id": delete_id})
-                    mongo_db.kpi_history.delete_many({"kpi_id": delete_id})
-                except Exception as e:
-                    print(f"Error deleting KPI: {str(e)}")
-                    return html.Div(f"Error deleting KPI: {str(e)}", className="text-danger"), stored_data
-        
-        # Handle KPI value update
-        elif trigger_id == "save-kpi-value.n_clicks" and update_value_clicks:
-            if update_id and new_value and update_date:
-                try:
-                    metric_data = {
-                        "kpi_id": update_id,
-                        "user_id": str(current_user.id),
-                        "value": float(new_value),
-                        "date": datetime.strptime(update_date, "%Y-%m-%d")
-                    }
-                    mongo_db.kpi_metrics.insert_one(metric_data)
-                except Exception as e:
-                    print(f"Error updating KPI value: {str(e)}")
-                    return html.Div(f"Error updating KPI value: {str(e)}", className="text-danger"), stored_data
-        
-        # Get fresh KPIs after any update
-        if needs_update:
-            kpis = get_cached_kpis(
-                user_id=current_user.id if not current_user.role == 'admin' else None,
-                is_admin=current_user.role == 'admin'
+        if "save-kpi-edit" in trigger_id and edit_id:
+            # Update KPI
+            mongo_db.kpis.update_one(
+                {"_id": ObjectId(edit_id)},
+                {"$set": {
+                    "name": name,
+                    "description": description,
+                    "category": category,
+                    "target": float(target)
+                }}
             )
+            
+            # Add to history
+            kpi = mongo_db.kpis.find_one({"_id": ObjectId(edit_id)})
+            if kpi:
+                history_data = {
+                    "kpi_id": edit_id,
+                    "user_id": current_user.id,
+                    "kpi_name": kpi["name"],
+                    "action": "edit",
+                    "comment": f"Updated KPI details",
+                    "date": datetime.now()
+                }
+                mongo_db.kpi_history.insert_one(history_data)
+        
+        elif "confirm-kpi-delete" in trigger_id and delete_id:
+            # Delete KPI
+            mongo_db.kpis.delete_one({"_id": ObjectId(delete_id)})
+            mongo_db.kpi_metrics.delete_many({"kpi_id": delete_id})
+            mongo_db.kpi_history.delete_many({"kpi_id": delete_id})
+        
+        elif "save-kpi-value" in trigger_id and update_id and new_value and update_date:
+            # Insert new metric value
+            metric_data = {
+                "kpi_id": update_id,
+                "user_id": current_user.id,
+                "value": float(new_value),
+                "date": datetime.strptime(update_date, "%Y-%m-%d")
+            }
+            mongo_db.kpi_metrics.insert_one(metric_data)
+            
+            # Add to history
+            kpi = mongo_db.kpis.find_one({"_id": ObjectId(update_id)})
+            if kpi:
+                history_data = {
+                    "kpi_id": update_id,
+                    "user_id": current_user.id,
+                    "kpi_name": kpi["name"],
+                    "action": "update",
+                    "comment": f"Updated value to {new_value}",
+                    "date": datetime.now()
+                }
+                mongo_db.kpi_history.insert_one(history_data)
+        
+        # Get updated KPI list
+        kpis = get_kpi_data(
+            user_id=current_user.id if not current_user.role == 'admin' else None,
+            is_admin=current_user.role == 'admin'
+        )
         
         return create_kpi_table(kpis), convert_to_json_serializable(kpis)
-        
+    
     except Exception as e:
         print(f"Error in update_kpi_list: {str(e)}")
         return html.Div(f"Error updating KPI list: {str(e)}", className="text-danger"), stored_data
@@ -2709,11 +2390,6 @@ def update_kpi_list(edit_clicks, delete_clicks, update_value_clicks, n_intervals
 # Add callbacks for modal functionality
 @app.callback(
     [Output("edit-kpi-modal", "is_open"),
-     Output("edit-kpi-name", "value"),
-     Output("edit-kpi-description", "value"),
-     Output("edit-kpi-category", "value"),
-     Output("edit-kpi-metric-type", "value"),
-     Output("edit-kpi-target", "value"),
      Output("edit-kpi-id", "value")],
     [Input({"type": "edit-kpi", "index": ALL}, "n_clicks"),
      Input("edit-modal-close", "n_clicks"),
@@ -2721,29 +2397,7 @@ def update_kpi_list(edit_clicks, delete_clicks, update_value_clicks, n_intervals
     [State("edit-kpi-modal", "is_open")]
 )
 def toggle_edit_modal(edit_clicks, close_click, save_click, is_open):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return False, "", "", "", "", "", ""
-    
-    trigger_id = ctx.triggered[0]["prop_id"]
-    
-    if trigger_id == "edit-modal-close.n_clicks" or trigger_id == "save-kpi-edit.n_clicks":
-        return False, "", "", "", "", "", ""
-    
-    if not any(edit_clicks):
-        raise PreventUpdate
-    
-    # Find which edit button was clicked
-    for i, clicks in enumerate(edit_clicks):
-        if clicks:
-            # Get the KPI ID from the button's index
-            kpi_id = ctx.inputs_list[0][i]["id"]["index"]
-            # Fetch KPI data from MongoDB
-            kpi = mongo_db.kpis.find_one({"_id": ObjectId(kpi_id)})
-            if kpi:
-                return True, kpi.get("name", ""), kpi.get("description", ""), kpi.get("category", ""), kpi.get("metric_type", ""), kpi.get("target", ""), kpi_id
-    
-    raise PreventUpdate
+    return toggle_modal(edit_clicks, "edit-modal-close", "save-kpi-edit", is_open)
 
 @app.callback(
     [Output("delete-kpi-modal", "is_open"),
@@ -2754,26 +2408,61 @@ def toggle_edit_modal(edit_clicks, close_click, save_click, is_open):
     [State("delete-kpi-modal", "is_open")]
 )
 def toggle_delete_modal(delete_clicks, close_click, confirm_click, is_open):
-    ctx = dash.callback_context
-    if not ctx.triggered:
+    return toggle_modal(delete_clicks, "delete-modal-close", "confirm-kpi-delete", is_open)
+
+@app.callback(
+    [Output("delete-program-modal", "is_open", allow_duplicate=True),
+     Output("delete-program-id", "value", allow_duplicate=True)],
+    [Input({"type": "delete-program", "index": ALL}, "n_clicks"),
+     Input("delete-program-close", "n_clicks"),
+     Input("confirm-program-delete", "n_clicks")],
+    [State("delete-program-modal", "is_open")],
+    prevent_initial_call=True
+)
+def toggle_delete_program_modal(delete_clicks, close_click, confirm_click, is_open):
+    return toggle_modal(delete_clicks, "delete-program-close", "confirm-program-delete", is_open)
+
+@app.callback(
+    [Output("delete-user-modal", "is_open", allow_duplicate=True),
+     Output("delete-user-id", "value", allow_duplicate=True)],
+    [Input({"type": "delete-user", "index": ALL}, "n_clicks"),
+     Input("delete-user-close", "n_clicks"),
+     Input("confirm-delete-user", "n_clicks")],
+    [State("delete-user-modal", "is_open")],
+    prevent_initial_call=True
+)
+def toggle_delete_user_modal(delete_clicks, close_click, confirm_click, is_open):
+    return toggle_modal(delete_clicks, "delete-user-close", "confirm-delete-user", is_open)
+
+@app.callback(
+    [Output("reset-password-modal", "is_open", allow_duplicate=True),
+     Output("reset-password-user-id", "value", allow_duplicate=True)],
+    [Input({"type": "reset-password", "index": ALL}, "n_clicks"),
+     Input("reset-password-close", "n_clicks"),
+     Input("confirm-reset-password", "n_clicks")],
+    [State("reset-password-modal", "is_open")],
+    prevent_initial_call=True
+)
+def toggle_reset_password_modal(reset_clicks, close_click, confirm_click, is_open):
+    return toggle_modal(reset_clicks, "reset-password-close", "confirm-reset-password", is_open)
+
+# Add a generic modal toggle function
+def toggle_modal(trigger_id, close_id, confirm_id, is_open, modal_id="", data_id=""):
+    """Generic function to handle modal toggling"""
+    if not trigger_id:
         return False, ""
     
-    trigger_id = ctx.triggered[0]["prop_id"]
-    
-    if trigger_id == "delete-modal-close.n_clicks":
+    if close_id in trigger_id or confirm_id in trigger_id:
         return False, ""
     
-    if trigger_id == "confirm-kpi-delete.n_clicks":
-        return False, ""
-    
-    if not any(delete_clicks):
+    if not any(trigger_id):
         raise PreventUpdate
     
-    # Find which delete button was clicked
-    for i, clicks in enumerate(delete_clicks):
+    # Find which button was clicked
+    for i, clicks in enumerate(trigger_id):
         if clicks:
-            kpi_id = ctx.inputs_list[0][i]["id"]["index"]
-            return True, kpi_id
+            item_id = trigger_id[i]["id"]["index"]
+            return True, item_id
     
     raise PreventUpdate
 
