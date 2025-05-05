@@ -216,10 +216,9 @@ app.layout = html.Div([
         dbc.ModalBody([
             dbc.Input(id="edit-kpi-name", placeholder="KPI Name", className="mb-3"),
             dbc.Input(id="edit-kpi-description", placeholder="Description", className="mb-3"),
-            dbc.Input(
+            dbc.Select(
                 id="edit-kpi-category",
-                placeholder="Enter Program Name",
-                type="text",
+                placeholder="Select Program",
                 className="mb-3"
             ),
             dbc.Select(
@@ -480,6 +479,13 @@ def create_kpi(n_clicks, name, description, category, metric_type, current_value
         )
     
     try:
+        # Input validation
+        if not name or not category or not metric_type:
+            return (
+                html.Div("Please fill in all required fields (Name, Program, and Metric Type)", className="text-danger"),
+                no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            )
+        
         # Verify the program exists
         program = mongo_db.programs.find_one({"name": category})
         if not program:
@@ -488,17 +494,28 @@ def create_kpi(n_clicks, name, description, category, metric_type, current_value
                 no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
             )
         
+        # Convert values to appropriate types
+        try:
+            target_value = float(target) if target else 0
+            current_value_float = float(current_value) if current_value else 0
+            update_date = datetime.strptime(date, "%Y-%m-%d") if date else datetime.now()
+        except ValueError as e:
+            return (
+                html.Div(f"Invalid numeric values: {str(e)}", className="text-danger"),
+                no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            )
+        
         # Create KPI document
         kpi_data = {
             "name": name,
-            "description": description,
+            "description": description or "",
             "category": category,
-            "program_id": program["_id"],
+            "program_id": str(program["_id"]),  # Convert ObjectId to string
             "metric_type": metric_type,
-            "target": float(target),
-            "initial_value": float(current_value),  # Store initial value
+            "target": target_value,
+            "initial_value": current_value_float,
             "created_at": datetime.now(),
-            "user_id": str(assigned_user)  # Store user_id as string
+            "user_id": str(assigned_user) if assigned_user else str(current_user.id)
         }
         
         # Insert KPI
@@ -508,29 +525,36 @@ def create_kpi(n_clicks, name, description, category, metric_type, current_value
             # Create initial metric
             metric_data = {
                 "kpi_id": str(kpi_result.inserted_id),
-                "user_id": str(assigned_user),  # Store user_id as string
-                "value": float(current_value),
-                "date": datetime.strptime(date, "%Y-%m-%d"),
-                "is_initial": True  # Mark as initial value
+                "user_id": str(assigned_user) if assigned_user else str(current_user.id),
+                "value": current_value_float,
+                "date": update_date,
+                "is_initial": True
             }
             mongo_db.kpi_metrics.insert_one(metric_data)
             
             # Create initial history entry
             history_data = {
                 "kpi_id": str(kpi_result.inserted_id),
-                "user_id": str(current_user.id),  # Store user_id as string
+                "user_id": str(current_user.id),
                 "kpi_name": name,
                 "action": "create",
-                "comment": f"KPI created with initial value: {current_value} and target: {target}",
+                "comment": f"KPI created with initial value: {current_value_float} and target: {target_value}",
                 "date": datetime.now()
             }
             mongo_db.kpi_history.insert_one(history_data)
             
-            # Get updated KPI list
-            kpis = get_cached_kpis(
+            # Clear cache
+            get_cached_kpis.cache_clear()
+            get_cached_metrics.cache_clear()
+            
+            # Get updated KPI list and convert to JSON-serializable format
+            kpis, _ = get_cached_kpis(
                 user_id=current_user.id if not current_user.role == 'admin' else None,
                 is_admin=current_user.role == 'admin'
             )
+            
+            # Convert KPIs to JSON-serializable format
+            serializable_kpis = convert_to_json_serializable(kpis)
             
             return (
                 html.Div("KPI created successfully!", className="text-success"),
@@ -543,7 +567,7 @@ def create_kpi(n_clicks, name, description, category, metric_type, current_value
                 datetime.now().strftime("%Y-%m-%d"),  # Reset date to today
                 None,  # Clear assigned user
                 create_kpi_table(kpis),  # Update KPI list
-                kpis  # Update store
+                serializable_kpis  # Update store with serializable data
             )
         else:
             return (
@@ -556,6 +580,20 @@ def create_kpi(n_clicks, name, description, category, metric_type, current_value
             html.Div(f"Error: {str(e)}", className="text-danger"),
             no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
         )
+
+def get_latest_comment(kpi_id):
+    """Helper function to get the latest comment for a KPI"""
+    try:
+        latest_history = mongo_db.kpi_history.find_one(
+            {"kpi_id": str(kpi_id)},
+            sort=[("date", -1)]
+        )
+        if latest_history and latest_history.get("comment"):
+            return latest_history["comment"]
+        return "No comments"
+    except Exception as e:
+        print(f"Error getting latest comment: {str(e)}")
+        return "Error"
 
 def create_kpi_table(kpis):
     """Helper function to create the KPI table."""
@@ -576,9 +614,9 @@ def create_kpi_table(kpis):
                             html.Th("Program"),
                             html.Th("Metric Type"),
                             html.Th("Initial Value"),
-                            html.Th("Current Value"),
                             html.Th("Target"),
                             html.Th("Last Updated"),
+                            html.Th("Latest Comment"),
                             html.Th("Assigned To"),
                             html.Th("Actions")
                         ])
@@ -589,9 +627,9 @@ def create_kpi_table(kpis):
                             html.Td(kpi.get("category", "N/A")),
                             html.Td(kpi.get("metric_type", "N/A")),
                             html.Td(str(kpi.get("initial_value", "N/A"))),
-                            html.Td(get_latest_metric_value(str(kpi["_id"]))),
                             html.Td(str(kpi.get("target", "N/A"))),
                             html.Td(get_latest_metric_date(str(kpi["_id"]))),
+                            html.Td(get_latest_comment(str(kpi["_id"]))),
                             html.Td(get_user_email(kpi.get("user_id"))),
                             html.Td([
                                 dbc.Button(
@@ -629,8 +667,30 @@ def create_kpi_table(kpis):
 def get_latest_metric_value(kpi_id):
     """Helper function to get the latest metric value for a KPI"""
     try:
-        metrics = get_cached_metrics(kpi_id)
-        return str(metrics[0]["value"]) if metrics else "No data"
+        # Get the latest metric for this KPI
+        latest_metric = mongo_db.kpi_metrics.find_one(
+            {"kpi_id": str(kpi_id)},
+            sort=[("date", -1)]  # Sort by date descending to get the most recent
+        )
+        
+        if latest_metric:
+            # Get the KPI to check metric type
+            kpi = mongo_db.kpis.find_one({"_id": ObjectId(kpi_id)})
+            if kpi:
+                metric_type = kpi.get("metric_type", "number")
+                value = latest_metric["value"]
+                
+                # Format the value based on metric type
+                if metric_type == "percentage":
+                    return f"{value:.1f}%"
+                elif metric_type == "currency":
+                    return f"${value:,.2f}"
+                elif metric_type == "time":
+                    return f"{value:.1f} hrs"
+                else:  # number
+                    return f"{value:,.2f}"
+        
+        return "No data"
     except Exception as e:
         print(f"Error getting metric value: {str(e)}")
         return "Error"
@@ -705,8 +765,8 @@ def update_charts(selected_charts, selected_kpis, time_range, n_clicks, n_interv
                 margin=dict(l=50, r=50, t=50, b=50)
             )
         
-        # Line Chart
-        if "line" in selected_charts:
+        # Performance Over Time (Line Chart)
+        if "performance" in selected_charts:
             fig = go.Figure()
             for kpi in kpis:
                 metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
@@ -717,21 +777,7 @@ def update_charts(selected_charts, selected_kpis, time_range, n_clicks, n_interv
                         mode='lines+markers',
                         name=kpi["name"]
                     ))
-            fig.update_layout(create_basic_layout("KPI Trends", "Date", "Value"))
-            charts.append(dcc.Graph(figure=fig))
-        
-        # Bar Chart
-        if "bar" in selected_charts:
-            fig = go.Figure()
-            for kpi in kpis:
-                metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
-                if metrics:
-                    fig.add_trace(go.Bar(
-                        x=[m["date"] for m in metrics],
-                        y=[m["value"] for m in metrics],
-                        name=kpi["name"]
-                    ))
-            fig.update_layout(create_basic_layout("KPI Values", "Date", "Value"))
+            fig.update_layout(create_basic_layout("KPI Performance Over Time", "Date", "Value"))
             charts.append(dcc.Graph(figure=fig))
         
         # Target vs Actual
@@ -757,31 +803,77 @@ def update_charts(selected_charts, selected_kpis, time_range, n_clicks, n_interv
             fig.update_layout(create_basic_layout("Target vs Actual Comparison", "Date", "Value"))
             charts.append(dcc.Graph(figure=fig))
         
-        # Monthly Trends
-        if "trends" in selected_charts:
+        # KPI Gauges
+        if "gauges" in selected_charts:
+            # Create a grid layout for gauges
+            rows = (len(kpis) + 1) // 2  # Round up division
+            fig = make_subplots(
+                rows=rows,
+                cols=2,
+                specs=[[{"type": "indicator"}] * 2] * rows,
+                subplot_titles=[kpi["name"] for kpi in kpis]
+            )
+            
+            for idx, kpi in enumerate(kpis):
+                metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
+                if metrics:
+                    latest_value = metrics[-1]["value"]
+                    target = kpi["target"]
+                    
+                    # Calculate row and column position
+                    row = idx // 2 + 1
+                    col = idx % 2 + 1
+                    
+                    fig.add_trace(
+                        go.Indicator(
+                            mode="gauge+number+delta",
+                            value=latest_value,
+                            delta={'reference': target},
+                            title={'text': f"{kpi['name']}"},
+                            gauge={
+                                'axis': {'range': [0, max(target * 1.2, latest_value * 1.2)]},
+                                'bar': {'color': "darkblue"},
+                                'steps': [
+                                    {'range': [0, target * 0.5], 'color': "#FF6B6B"},  # Red for low performance
+                                    {'range': [target * 0.5, target * 0.75], 'color': "#FFB74D"},  # Orange for medium performance
+                                    {'range': [target * 0.75, target], 'color': "#4CAF50"}  # Green for good performance
+                                ],
+                                'threshold': {
+                                    'line': {'color': "red", 'width': 4},
+                                    'thickness': 0.75,
+                                    'value': target
+                                }
+                            }
+                        ),
+                        row=row,
+                        col=col
+                    )
+            
+            fig.update_layout(
+                height=300 * rows,
+                showlegend=False,
+                margin=dict(l=50, r=50, t=50, b=50),
+                title_text="KPI Progress Overview",
+                title_x=0.5
+            )
+            charts.append(dcc.Graph(figure=fig))
+        
+        # Progress Tracking
+        if "progress" in selected_charts:
             fig = go.Figure()
             for kpi in kpis:
                 metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
                 if metrics:
-                    monthly_data = {}
-                    for metric in metrics:
-                        month_key = metric["date"].strftime("%Y-%m")
-                        if month_key not in monthly_data:
-                            monthly_data[month_key] = []
-                        monthly_data[month_key].append(metric["value"])
-                    
-                    months = []
-                    averages = []
-                    for month, values in sorted(monthly_data.items()):
-                        months.append(month)
-                        averages.append(sum(values) / len(values))
+                    initial_value = metrics[0]["value"]
+                    latest_value = metrics[-1]["value"]
+                    progress = ((latest_value - initial_value) / initial_value) * 100 if initial_value != 0 else 0
                     
                     fig.add_trace(go.Bar(
-                        x=months,
-                        y=averages,
+                        x=[kpi["name"]],
+                        y=[progress],
                         name=kpi["name"]
                     ))
-            fig.update_layout(create_basic_layout("Monthly Trends", "Month", "Average Value"))
+            fig.update_layout(create_basic_layout("Progress Since Start", "KPI", "Progress (%)"))
             charts.append(dcc.Graph(figure=fig))
         
         return html.Div(charts)
@@ -1159,122 +1251,107 @@ def generate_report(n_clicks, report_type, program_id, user_id, start_date, end_
         elif report_type == "user" and user_id:
             query["user_id"] = ObjectId(user_id)
         
-        # Get KPIs and their latest metrics
+        # Get KPIs and their metrics
         kpis = list(mongo_db.kpis.find(query))
         
         if not kpis:
             return html.Div("No data found for the selected filters", className="text-muted")
         
-        # Create report table
-        return dbc.Table([
-            html.Thead([
-                html.Tr([
-                    html.Th("Project Name"),
-                    html.Th("KPI"),
-                    html.Th("Description"),
-                    html.Th("Target"),
-                    html.Th("Current Status"),
-                    html.Th("Progress/Comments"),
-                    html.Th("Owner"),
-                    html.Th("Review Frequency")
-                ])
-            ]),
-            html.Tbody([
-                html.Tr([
-                    html.Td(get_program_name(kpi.get("program_id"))),
-                    html.Td(kpi["name"]),
-                    html.Td(kpi.get("description", "N/A")),
-                    html.Td(kpi.get("target", "N/A")),
-                    html.Td(get_latest_metric(kpi["_id"])),
-                    html.Td(get_latest_comment(kpi["_id"])),
-                    html.Td(get_owner_name(kpi.get("user_id"))),
-                    html.Td(kpi.get("review_frequency", "Monthly"))
-                ]) for kpi in kpis
-            ])
-        ], bordered=True, hover=True, responsive=True)
+        # Group KPIs by program
+        programs = {}
+        for kpi in kpis:
+            program_name = get_program_name(kpi.get("program_id"))
+            if program_name not in programs:
+                programs[program_name] = []
+            programs[program_name].append(kpi)
+        
+        # Create report content
+        report_content = []
+        
+        for program_name, program_kpis in programs.items():
+            # Create program section
+            program_section = [
+                html.H4(program_name, className="mt-4 mb-3"),
+                dbc.Table([
+                    html.Thead([
+                        html.Tr([
+                            html.Th("KPI"),
+                            html.Th("Description"),
+                            html.Th("Target"),
+                            html.Th("Current Status"),
+                            html.Th("Owner"),
+                            html.Th("Review Frequency")
+                        ])
+                    ]),
+                    html.Tbody([
+                        html.Tr([
+                            html.Td(kpi["name"]),
+                            html.Td(kpi.get("description", "N/A")),
+                            html.Td(kpi.get("target", "N/A")),
+                            html.Td(get_latest_metric(kpi["_id"])),
+                            html.Td(get_owner_name(kpi.get("user_id"))),
+                            html.Td(kpi.get("review_frequency", "Monthly"))
+                        ]) for kpi in program_kpis
+                    ])
+                ], bordered=True, hover=True, responsive=True, className="mb-4")
+            ]
+            
+            # Add updates section for each KPI
+            for kpi in program_kpis:
+                updates_section = [
+                    html.H5(f"Updates for {kpi['name']}", className="mt-3 mb-2"),
+                    dbc.Table([
+                        html.Thead([
+                            html.Tr([
+                                html.Th("Date"),
+                                html.Th("Value"),
+                                html.Th("Comment"),
+                                html.Th("Updated By")
+                            ])
+                        ]),
+                        html.Tbody([
+                            html.Tr([
+                                html.Td(metric["date"].strftime("%Y-%m-%d")),
+                                html.Td(str(metric["value"])),
+                                html.Td(get_comment_for_metric(kpi["_id"], metric["date"])),
+                                html.Td(get_user_email(metric.get("user_id")))
+                            ]) for metric in get_kpi_metrics(kpi["_id"], start_date, end_date)
+                        ])
+                    ], bordered=True, hover=True, responsive=True, className="mb-4")
+                ]
+                program_section.extend(updates_section)
+            
+            report_content.append(html.Div(program_section))
+        
+        return html.Div(report_content)
+    
     except Exception as e:
         print(f"Error generating report: {str(e)}")
         return html.Div(f"Error generating report: {str(e)}", className="text-danger")
 
-@app.callback(
-    Output("download-dataframe-xlsx", "data"),
-    [Input("export-excel", "n_clicks")],
-    [State("report-content", "children"),
-     State("date-range", "start_date"),
-     State("date-range", "end_date")]
-)
-def export_report(n_clicks, report_content, start_date, end_date):
-    if not n_clicks or not report_content:
-        raise PreventUpdate
-    
+def get_kpi_metrics(kpi_id, start_date, end_date):
+    """Helper function to get metrics for a KPI within a date range"""
     try:
-        # Convert the report data to a pandas DataFrame
-        data = []
-        for row in report_content["props"]["children"][1]["props"]["children"]:
-            cells = row["props"]["children"]
-            data.append({
-                "Project Name": cells[0]["props"]["children"],
-                "KPI": cells[1]["props"]["children"],
-                "Description": cells[2]["props"]["children"],
-                "Target": cells[3]["props"]["children"],
-                "Current Status": cells[4]["props"]["children"],
-                "Progress/Comments": cells[5]["props"]["children"],
-                "Owner": cells[6]["props"]["children"],
-                "Review Frequency": cells[7]["props"]["children"]
-            })
-        
-        df = pd.DataFrame(data)
-        
-        # Create Excel writer
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, sheet_name="KPI Report", index=False)
-            
-            # Get workbook and worksheet objects
-            workbook = writer.book
-            worksheet = writer.sheets['KPI Report']
-            
-            # Define header format
-            header_format = workbook.add_format({
-                'bold': True,
-                'font_size': 12,
-                'text_wrap': True,
-                'valign': 'vcenter',
-                'fg_color': '#4472C4',
-                'font_color': 'white',
-                'border': 1,
-                'align': 'center',
-                'border_color': '#2F528F'
-            })
-            
-            # Format headers and set column widths
-            for col_num, value in enumerate(df.columns.values):
-                worksheet.write(0, col_num, value, header_format)
-                # Set minimum width of 14 characters for all columns
-                worksheet.set_column(col_num, col_num, 14)
-            
-            # Add autofilter
-            worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
-            
-            # Add alternating row colors
-            worksheet.conditional_format(1, 0, len(df), len(df.columns) - 1, {
-                'type': 'formula',
-                'criteria': '=MOD(ROW(),2)=0',
-                'format': workbook.add_format({
-                    'bg_color': '#F2F2F2',
-                    'border': 1,
-                    'border_color': '#2F528F'
-                })
-            })
-        
-        output.seek(0)
-        return dcc.send_bytes(
-            output.getvalue(),
-            filename=f"kpi_report_{datetime.now().strftime('%Y%m%d')}.xlsx"
-        )
+        return list(mongo_db.kpi_metrics.find({
+            "kpi_id": str(kpi_id),
+            "date": {"$gte": start_date, "$lte": end_date}
+        }).sort("date", -1))  # Sort by date descending
     except Exception as e:
-        print(f"Error exporting report: {str(e)}")
-        raise PreventUpdate
+        print(f"Error getting KPI metrics: {str(e)}")
+        return []
+
+def get_comment_for_metric(kpi_id, metric_date):
+    """Helper function to get the comment associated with a metric update"""
+    try:
+        # Find the history entry closest to the metric date
+        history = mongo_db.kpi_history.find_one({
+            "kpi_id": str(kpi_id),
+            "date": {"$lte": metric_date}
+        }, sort=[("date", -1)])
+        return history.get("comment", "No comment") if history else "No comment"
+    except Exception as e:
+        print(f"Error getting comment for metric: {str(e)}")
+        return "Error"
 
 # Add program management page
 def render_program_management():
@@ -1517,13 +1594,15 @@ def get_latest_metric(kpi_id):
         return "Error"
 
 def get_latest_comment(kpi_id):
-    """Helper function to get latest comment from history"""
+    """Helper function to get the latest comment for a KPI"""
     try:
         latest_history = mongo_db.kpi_history.find_one(
             {"kpi_id": str(kpi_id)},
             sort=[("date", -1)]
         )
-        return latest_history.get("comment", "No comments") if latest_history else "No comments"
+        if latest_history and latest_history.get("comment"):
+            return latest_history["comment"]
+        return "No comments"
     except Exception as e:
         print(f"Error getting latest comment: {str(e)}")
         return "Error"
@@ -1856,14 +1935,10 @@ def render_kpi_dashboard():
                             options=[
                                 {"label": "Performance Over Time", "value": "performance"},
                                 {"label": "Target vs Actual", "value": "target"},
-                                {"label": "Category Distribution", "value": "category"},
                                 {"label": "KPI Gauges", "value": "gauges"},
-                                {"label": "Monthly Trends", "value": "trends"},
-                                {"label": "Achievement Rate", "value": "achievement"},
-                                {"label": "Progress Tracking", "value": "progress"},
-                                {"label": "Status Overview", "value": "status"}
+                                {"label": "Progress Tracking", "value": "progress"}
                             ],
-                            value=["performance", "target", "category"],
+                            value=["performance", "target", "gauges"],
                             inline=True,
                             switch=True
                         )
@@ -1916,17 +1991,38 @@ def render_kpi_dashboard():
 
 # Add callback to handle edit program modal
 @app.callback(
-    [Output("edit-program-modal", "is_open"),
-     Output("edit-program-name", "value"),
-     Output("edit-program-description", "value"),
-     Output("edit-program-id", "value")],
+    [Output("edit-program-modal", "is_open", allow_duplicate=True),
+     Output("edit-program-name", "value", allow_duplicate=True),
+     Output("edit-program-description", "value", allow_duplicate=True),
+     Output("edit-program-id", "value", allow_duplicate=True)],
     [Input({"type": "edit-program", "index": ALL}, "n_clicks"),
      Input("edit-program-close", "n_clicks"),
      Input("save-program-edit", "n_clicks")],
-    [State("edit-program-modal", "is_open")]
+    [State("edit-program-modal", "is_open")],
+    prevent_initial_call=True
 )
 def toggle_edit_program_modal(edit_clicks, close_click, save_click, is_open):
-    return toggle_modal(edit_clicks, "edit-program-close", "save-program-edit", is_open)
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+        
+    trigger_id = ctx.triggered[0]["prop_id"]
+    
+    if "edit-program-close" in trigger_id or "save-program-edit" in trigger_id:
+        return False, "", "", ""
+        
+    if not any(edit_clicks):
+        raise PreventUpdate
+        
+    # Find which button was clicked
+    for i, clicks in enumerate(edit_clicks):
+        if clicks:
+            item_id = edit_clicks[i]["id"]["index"]
+            program = mongo_db.programs.find_one({"_id": ObjectId(item_id)})
+            if program:
+                return True, program["name"], program.get("description", ""), item_id
+            
+    raise PreventUpdate
 
 # Add user management page
 def render_user_management():
@@ -2166,14 +2262,112 @@ def create_user(n_clicks, email, password, role):
         print(f"Error creating user: {str(e)}")
         return html.Div(f"Error creating user: {str(e)}", className="text-danger"), no_update, no_update, no_update
 
-# Add callback for update value modal
+# Update the edit modal callback
 @app.callback(
-    [Output("update-value-modal", "is_open", allow_duplicate=True),
-     Output("update-value-kpi-id", "value", allow_duplicate=True),
-     Output("update-value-kpi-name", "children", allow_duplicate=True),
-     Output("update-kpi-value", "value", allow_duplicate=True),
-     Output("update-kpi-date", "value", allow_duplicate=True),
-     Output("update-kpi-comment", "value", allow_duplicate=True)],
+    [Output("edit-kpi-modal", "is_open", allow_duplicate=True),
+     Output("edit-kpi-id", "value", allow_duplicate=True),
+     Output("edit-kpi-name", "value", allow_duplicate=True),
+     Output("edit-kpi-description", "value", allow_duplicate=True),
+     Output("edit-kpi-category", "value", allow_duplicate=True),
+     Output("edit-kpi-metric-type", "value", allow_duplicate=True),
+     Output("edit-kpi-target", "value", allow_duplicate=True),
+     Output("kpi-list", "children", allow_duplicate=True),
+     Output("kpi-data-store", "data", allow_duplicate=True)],
+    [Input({"type": "edit-kpi", "index": ALL}, "n_clicks"),
+     Input("edit-modal-close", "n_clicks"),
+     Input("save-kpi-edit", "n_clicks")],
+    [State("edit-kpi-modal", "is_open"),
+     State("edit-kpi-id", "value"),
+     State("edit-kpi-name", "value"),
+     State("edit-kpi-description", "value"),
+     State("edit-kpi-category", "value"),
+     State("edit-kpi-metric-type", "value"),
+     State("edit-kpi-target", "value")],
+    prevent_initial_call=True
+)
+def toggle_edit_modal(edit_clicks, close_click, save_click, is_open, edit_id, name, description, category, metric_type, target):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+        
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
+    
+    if "edit-modal-close" in trigger_prop:
+        return False, "", "", "", "", "", "", no_update, no_update
+    
+    if "save-kpi-edit" in trigger_prop and edit_id:
+        try:
+            # Update KPI
+            mongo_db.kpis.update_one(
+                {"_id": ObjectId(edit_id)},
+                {"$set": {
+                    "name": name,
+                    "description": description,
+                    "category": category,
+                    "metric_type": metric_type,
+                    "target": float(target) if target else 0
+                }}
+            )
+            
+            # Add to history
+            kpi = mongo_db.kpis.find_one({"_id": ObjectId(edit_id)})
+            if kpi:
+                history_data = {
+                    "kpi_id": str(edit_id),
+                    "user_id": str(current_user.id),
+                    "kpi_name": kpi["name"],
+                    "action": "edit",
+                    "comment": f"Updated KPI details",
+                    "date": datetime.now()
+                }
+                mongo_db.kpi_history.insert_one(history_data)
+            
+            # Clear cache
+            get_cached_kpis.cache_clear()
+            get_cached_metrics.cache_clear()
+            
+            # Get fresh data
+            kpis, _ = get_cached_kpis(
+                user_id=current_user.id if not current_user.role == 'admin' else None,
+                is_admin=current_user.role == 'admin'
+            )
+            
+            # Convert to JSON-serializable format
+            serializable_kpis = convert_to_json_serializable(kpis)
+            
+            return False, "", "", "", "", "", "", create_kpi_table(kpis), serializable_kpis
+            
+        except Exception as e:
+            print(f"Error updating KPI: {str(e)}")
+            return is_open, edit_id, name, description, category, metric_type, target, no_update, no_update
+    
+    # Handle pattern-matching callback for edit button
+    if not any(edit_clicks):
+        raise PreventUpdate
+    
+    # Find which button was clicked
+    for i, clicks in enumerate(edit_clicks):
+        if clicks:
+            button_id = ctx.inputs_list[0][i]["id"]
+            if isinstance(button_id, dict) and "index" in button_id:
+                item_id = button_id["index"]
+                kpi = mongo_db.kpis.find_one({"_id": ObjectId(item_id)})
+                if kpi:
+                    return True, item_id, kpi["name"], kpi.get("description", ""), kpi.get("category", ""), kpi.get("metric_type", ""), kpi.get("target", ""), no_update, no_update
+    
+    raise PreventUpdate
+
+# Update the update value modal callback
+@app.callback(
+    [Output("update-value-modal", "is_open"),
+     Output("update-value-kpi-id", "value"),
+     Output("update-value-kpi-name", "children"),
+     Output("update-kpi-value", "value"),
+     Output("update-kpi-date", "value"),
+     Output("update-kpi-comment", "value"),
+     Output("kpi-list", "children", allow_duplicate=True),
+     Output("kpi-data-store", "data", allow_duplicate=True)],
     [Input({"type": "update-value", "index": ALL}, "n_clicks"),
      Input("update-value-modal-close", "n_clicks"),
      Input("save-kpi-value", "n_clicks")],
@@ -2188,44 +2382,116 @@ def toggle_update_value_modal(update_clicks, close_click, save_click, is_open, n
     ctx = dash.callback_context
     if not ctx.triggered:
         raise PreventUpdate
-        
-    trigger_id = ctx.triggered[0]["prop_id"]
     
-    if "update-value-modal-close" in trigger_id or "save-kpi-value" in trigger_id:
-        return False, "", "", "", "", ""
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
+    
+    if "update-value-modal-close" in trigger_prop:
+        return False, "", "", "", "", "", no_update, no_update
+    
+    if "save-kpi-value" in trigger_prop:
+        if not new_value or not update_date or not comment:
+            return is_open, kpi_id, "", new_value, update_date, comment, no_update, no_update
         
+        try:
+            # Insert new metric value
+            metric_data = {
+                "kpi_id": str(kpi_id),
+                "user_id": str(current_user.id),
+                "value": float(new_value),
+                "date": datetime.strptime(update_date, "%Y-%m-%d")
+            }
+            mongo_db.kpi_metrics.insert_one(metric_data)
+            
+            # Add to history
+            kpi = mongo_db.kpis.find_one({"_id": ObjectId(kpi_id)})
+            if kpi:
+                history_data = {
+                    "kpi_id": str(kpi_id),
+                    "user_id": str(current_user.id),
+                    "kpi_name": kpi["name"],
+                    "action": "update",
+                    "comment": comment,
+                    "date": datetime.now()
+                }
+                mongo_db.kpi_history.insert_one(history_data)
+            
+            # Clear cache
+            get_cached_kpis.cache_clear()
+            get_cached_metrics.cache_clear()
+            
+            # Get fresh data
+            kpis, _ = get_cached_kpis(
+                user_id=current_user.id if not current_user.role == 'admin' else None,
+                is_admin=current_user.role == 'admin'
+            )
+            
+            # Convert to JSON-serializable format
+            serializable_kpis = convert_to_json_serializable(kpis)
+            
+            return False, "", "", "", "", "", create_kpi_table(kpis), serializable_kpis
+            
+        except Exception as e:
+            print(f"Error updating KPI value: {str(e)}")
+            return is_open, kpi_id, "", new_value, update_date, comment, no_update, no_update
+    
+    # Handle pattern-matching callback for update value button
     if not any(update_clicks):
         raise PreventUpdate
-        
+    
     # Find which button was clicked
     for i, clicks in enumerate(update_clicks):
         if clicks:
-            item_id = update_clicks[i]["id"]["index"]
-            kpi = mongo_db.kpis.find_one({"_id": ObjectId(item_id)})
-            if kpi:
-                return True, item_id, kpi["name"], "", datetime.now().strftime("%Y-%m-%d"), ""
-            
+            button_id = ctx.inputs_list[0][i]["id"]
+            if isinstance(button_id, dict) and "index" in button_id:
+                item_id = button_id["index"]
+                kpi = mongo_db.kpis.find_one({"_id": ObjectId(item_id)})
+                if kpi:
+                    return True, item_id, kpi["name"], "", datetime.now().strftime("%Y-%m-%d"), "", no_update, no_update
+    
     raise PreventUpdate
 
 # Add utility functions for data fetching
+def convert_to_json_serializable(data):
+    """Convert MongoDB documents to JSON-serializable format"""
+    if isinstance(data, list):
+        return [convert_to_json_serializable(item) for item in data]
+    elif isinstance(data, dict):
+        return {k: convert_to_json_serializable(v) for k, v in data.items()}
+    elif isinstance(data, ObjectId):
+        return str(data)
+    elif isinstance(data, datetime):
+        return data.isoformat()
+    else:
+        return data
+
 def get_kpi_data(kpi_id=None, user_id=None, is_admin=False, start_date=None, end_date=None):
     """Get KPI data with optional filtering"""
     query = {}
     if kpi_id:
-        query["_id"] = ObjectId(kpi_id)
+        try:
+            query["_id"] = ObjectId(kpi_id)
+        except Exception as e:
+            print(f"Error converting kpi_id to ObjectId: {str(e)}")
+            return []
+    
     if not is_admin and user_id:
         query["user_id"] = str(user_id)
     
-    kpis = list(mongo_db.kpis.find(query).sort('created_at', -1))
-    
-    if start_date and end_date:
-        for kpi in kpis:
-            kpi["metrics"] = list(mongo_db.kpi_metrics.find({
-                "kpi_id": str(kpi["_id"]),
-                "date": {"$gte": start_date, "$lte": end_date}
-            }).sort("date", 1))
-    
-    return kpis
+    try:
+        kpis = list(mongo_db.kpis.find(query).sort('created_at', -1))
+        
+        if start_date and end_date:
+            for kpi in kpis:
+                kpi["metrics"] = list(mongo_db.kpi_metrics.find({
+                    "kpi_id": str(kpi["_id"]),
+                    "date": {"$gte": start_date, "$lte": end_date}
+                }).sort("date", 1))
+        
+        return kpis
+    except Exception as e:
+        print(f"Error fetching KPI data: {str(e)}")
+        return []
 
 def get_user_data(user_id=None):
     """Get user data with optional filtering"""
@@ -2263,12 +2529,14 @@ def get_history_data(kpi_id=None, user_id=None, start_date=None, end_date=None):
 @lru_cache(maxsize=128)
 def get_cached_kpis(user_id=None, is_admin=False):
     """Cached function to get KPIs with a 5-minute cache duration"""
-    return get_kpi_data(user_id=user_id, is_admin=is_admin)
+    # Add a timestamp to force cache invalidation after 5 minutes
+    timestamp = int(datetime.now().timestamp() / 300)  # Divide by 300 (5 minutes) to get 5-minute intervals
+    return get_kpi_data(user_id=str(user_id) if user_id else None, is_admin=is_admin), timestamp
 
 @lru_cache(maxsize=128)
 def get_cached_metrics(kpi_id):
     """Cached function to get metrics for a KPI"""
-    return get_metric_data(kpi_id)
+    return get_metric_data(str(kpi_id))
 
 # Update callbacks to use the utility functions
 @app.callback(
@@ -2276,6 +2544,7 @@ def get_cached_metrics(kpi_id):
      Output("kpi-data-store", "data")],
     [Input("save-kpi-edit", "n_clicks"),
      Input("confirm-kpi-delete", "n_clicks"),
+     Input("create-kpi-button", "n_clicks"),
      Input("save-kpi-value", "n_clicks"),
      Input("interval-component", "n_intervals")],
     [State("edit-kpi-id", "value"),
@@ -2284,15 +2553,12 @@ def get_cached_metrics(kpi_id):
      State("edit-kpi-category", "value"),
      State("edit-kpi-target", "value"),
      State("delete-kpi-id", "value"),
-     State("update-value-kpi-id", "value"),
-     State("update-kpi-value", "value"),
-     State("update-kpi-date", "value"),
      State("kpi-data-store", "data")],
     prevent_initial_call=True
 )
-def update_kpi_list(edit_clicks, delete_clicks, update_value_clicks, n_intervals,
+def update_kpi_list(edit_clicks, delete_clicks, create_clicks, update_clicks, n_intervals,
                     edit_id, name, description, category, target,
-                    delete_id, update_id, new_value, update_date, stored_data):
+                    delete_id, stored_data):
     ctx = dash.callback_context
     
     try:
@@ -2303,86 +2569,85 @@ def update_kpi_list(edit_clicks, delete_clicks, update_value_clicks, n_intervals
             if "interval-component" not in trigger_id:
                 needs_update = True
                 get_cached_kpis.cache_clear()
-                if update_id:
-                    get_cached_metrics.cache_clear()
+                get_cached_metrics.cache_clear()
         
         # Get KPIs from cache or stored data
         if not needs_update and stored_data:
             kpis = stored_data
         else:
-            kpis = get_kpi_data(
+            kpis, _ = get_cached_kpis(
                 user_id=current_user.id if not current_user.role == 'admin' else None,
                 is_admin=current_user.role == 'admin'
             )
+            
+            # Ensure kpis is a list
+            if not isinstance(kpis, list):
+                kpis = []
         
         if not ctx.triggered:
             return create_kpi_table(kpis), convert_to_json_serializable(kpis)
-        
+            
         # Handle different actions
         trigger_id = ctx.triggered[0]["prop_id"]
         
         if "save-kpi-edit" in trigger_id and edit_id:
-            # Update KPI
-            mongo_db.kpis.update_one(
-                {"_id": ObjectId(edit_id)},
-                {"$set": {
-                    "name": name,
-                    "description": description,
-                    "category": category,
-                    "target": float(target)
-                }}
-            )
-            
-            # Add to history
-            kpi = mongo_db.kpis.find_one({"_id": ObjectId(edit_id)})
-            if kpi:
-                history_data = {
-                    "kpi_id": edit_id,
-                    "user_id": current_user.id,
-                    "kpi_name": kpi["name"],
-                    "action": "edit",
-                    "comment": f"Updated KPI details",
-                    "date": datetime.now()
-                }
-                mongo_db.kpi_history.insert_one(history_data)
+            try:
+                # Update KPI
+                mongo_db.kpis.update_one(
+                    {"_id": ObjectId(edit_id)},
+                    {"$set": {
+                        "name": name,
+                        "description": description,
+                        "category": category,
+                        "target": float(target) if target else 0
+                    }}
+                )
+                
+                # Add to history
+                kpi = mongo_db.kpis.find_one({"_id": ObjectId(edit_id)})
+                if kpi:
+                    history_data = {
+                        "kpi_id": str(edit_id),
+                        "user_id": str(current_user.id),
+                        "kpi_name": kpi["name"],
+                        "action": "edit",
+                        "comment": f"Updated KPI details",
+                        "date": datetime.now()
+                    }
+                    mongo_db.kpi_history.insert_one(history_data)
+            except Exception as e:
+                print(f"Error updating KPI: {str(e)}")
+                return html.Div(f"Error updating KPI: {str(e)}", className="text-danger"), stored_data
         
         elif "confirm-kpi-delete" in trigger_id and delete_id:
-            # Delete KPI
-            mongo_db.kpis.delete_one({"_id": ObjectId(delete_id)})
-            mongo_db.kpi_metrics.delete_many({"kpi_id": delete_id})
-            mongo_db.kpi_history.delete_many({"kpi_id": delete_id})
+            try:
+                # Delete KPI
+                mongo_db.kpis.delete_one({"_id": ObjectId(delete_id)})
+                mongo_db.kpi_metrics.delete_many({"kpi_id": str(delete_id)})
+                mongo_db.kpi_history.delete_many({"kpi_id": str(delete_id)})
+            except Exception as e:
+                print(f"Error deleting KPI: {str(e)}")
+                return html.Div(f"Error deleting KPI: {str(e)}", className="text-danger"), stored_data
         
-        elif "save-kpi-value" in trigger_id and update_id and new_value and update_date:
-            # Insert new metric value
-            metric_data = {
-                "kpi_id": update_id,
-                "user_id": current_user.id,
-                "value": float(new_value),
-                "date": datetime.strptime(update_date, "%Y-%m-%d")
-            }
-            mongo_db.kpi_metrics.insert_one(metric_data)
+        # Get fresh data after any action
+        try:
+            kpis, _ = get_cached_kpis(
+                user_id=current_user.id if not current_user.role == 'admin' else None,
+                is_admin=current_user.role == 'admin'
+            )
+        
+            # Ensure kpis is a list
+            if not isinstance(kpis, list):
+                kpis = []
+                
+            # Convert to JSON-serializable format
+            serializable_kpis = convert_to_json_serializable(kpis)
             
-            # Add to history
-            kpi = mongo_db.kpis.find_one({"_id": ObjectId(update_id)})
-            if kpi:
-                history_data = {
-                    "kpi_id": update_id,
-                    "user_id": current_user.id,
-                    "kpi_name": kpi["name"],
-                    "action": "update",
-                    "comment": f"Updated value to {new_value}",
-                    "date": datetime.now()
-                }
-                mongo_db.kpi_history.insert_one(history_data)
+            return create_kpi_table(kpis), serializable_kpis
+        except Exception as e:
+            print(f"Error getting fresh KPI data: {str(e)}")
+            return html.Div("Error refreshing KPI list", className="text-danger"), stored_data
         
-        # Get updated KPI list
-        kpis = get_kpi_data(
-            user_id=current_user.id if not current_user.role == 'admin' else None,
-            is_admin=current_user.role == 'admin'
-        )
-        
-        return create_kpi_table(kpis), convert_to_json_serializable(kpis)
-    
     except Exception as e:
         print(f"Error in update_kpi_list: {str(e)}")
         return html.Div(f"Error updating KPI list: {str(e)}", className="text-danger"), stored_data
@@ -2449,22 +2714,271 @@ def toggle_reset_password_modal(reset_clicks, close_click, confirm_click, is_ope
 # Add a generic modal toggle function
 def toggle_modal(trigger_id, close_id, confirm_id, is_open, modal_id="", data_id=""):
     """Generic function to handle modal toggling"""
-    if not trigger_id:
+    ctx = dash.callback_context
+    if not ctx.triggered:
         return False, ""
     
-    if close_id in trigger_id or confirm_id in trigger_id:
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
+    
+    if close_id in trigger_prop or confirm_id in trigger_prop:
         return False, ""
     
     if not any(trigger_id):
         raise PreventUpdate
     
-    # Find which button was clicked
+    # For pattern-matching callbacks
+    if "id" in trigger:
+        button_id = trigger["id"]
+        if isinstance(button_id, dict) and "index" in button_id:
+            return True, button_id["index"]
+    
+    # For regular callbacks
     for i, clicks in enumerate(trigger_id):
         if clicks:
-            item_id = trigger_id[i]["id"]["index"]
-            return True, item_id
+            if isinstance(trigger_id[i], dict) and "id" in trigger_id[i]:
+                button_id = trigger_id[i]["id"]
+                if isinstance(button_id, dict) and "index" in button_id:
+                    return True, button_id["index"]
+            # For regular button indices, we need to get the actual KPI ID
+            try:
+                kpi = mongo_db.kpis.find_one({}, skip=i, limit=1)
+                if kpi:
+                    return True, str(kpi["_id"])
+            except Exception as e:
+                print(f"Error getting KPI ID: {str(e)}")
+                raise PreventUpdate
     
     raise PreventUpdate
+
+# Add callback to populate program dropdown in edit modal
+@app.callback(
+    Output("edit-kpi-category", "options"),
+    [Input("edit-kpi-modal", "is_open")]
+)
+def update_edit_program_options(is_open):
+    if not is_open:
+        raise PreventUpdate
+    
+    programs = list(mongo_db.programs.find())
+    return [{"label": p["name"], "value": p["name"]} for p in programs]
+
+@app.callback(
+    Output("download-dataframe-xlsx", "data"),
+    [Input("export-excel", "n_clicks")],
+    [State("report-type", "value"),
+     State("program-filter", "value"),
+     State("user-filter", "value"),
+     State("date-range", "start_date"),
+     State("date-range", "end_date")]
+)
+def export_report(n_clicks, report_type, program_id, user_id, start_date, end_date):
+    if not n_clicks:
+        raise PreventUpdate
+    
+    try:
+        # Convert string dates to datetime objects
+        start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        # Build query based on filters
+        query = {
+            "created_at": {
+                "$gte": start_date,
+                "$lte": end_date + timedelta(days=1)
+            }
+        }
+        
+        if report_type == "program" and program_id:
+            query["program_id"] = ObjectId(program_id)
+        elif report_type == "user" and user_id:
+            query["user_id"] = ObjectId(user_id)
+        
+        # Get KPIs and their metrics
+        kpis = list(mongo_db.kpis.find(query))
+        
+        if not kpis:
+            raise PreventUpdate
+        
+        # Group KPIs by program
+        programs = {}
+        for kpi in kpis:
+            program_name = get_program_name(kpi.get("program_id"))
+            if program_name not in programs:
+                programs[program_name] = []
+            programs[program_name].append(kpi)
+        
+        # Create Excel writer
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            
+            # Define formats
+            title_format = workbook.add_format({
+                'bold': True,
+                'font_size': 16,
+                'align': 'center',
+                'valign': 'vcenter',
+                'fg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1,
+                'border_color': '#2F528F'
+            })
+            
+            header_format = workbook.add_format({
+                'bold': True,
+                'font_size': 12,
+                'text_wrap': True,
+                'valign': 'vcenter',
+                'fg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1,
+                'align': 'center',
+                'border_color': '#2F528F'
+            })
+            
+            program_format = workbook.add_format({
+                'bold': True,
+                'font_size': 14,
+                'fg_color': '#D9E1F2',
+                'border': 1,
+                'border_color': '#2F528F',
+                'align': 'center'
+            })
+            
+            kpi_format = workbook.add_format({
+                'bold': True,
+                'font_size': 12,
+                'fg_color': '#E9EFF7',
+                'border': 1,
+                'border_color': '#2F528F',
+                'align': 'center'
+            })
+            
+            cell_format = workbook.add_format({
+                'font_size': 11,
+                'border': 1,
+                'border_color': '#2F528F',
+                'align': 'left',
+                'valign': 'vcenter'
+            })
+            
+            number_format = workbook.add_format({
+                'font_size': 11,
+                'border': 1,
+                'border_color': '#2F528F',
+                'align': 'right',
+                'valign': 'vcenter',
+                'num_format': '#,##0.00'
+            })
+            
+            date_format = workbook.add_format({
+                'font_size': 11,
+                'border': 1,
+                'border_color': '#2F528F',
+                'align': 'center',
+                'valign': 'vcenter',
+                'num_format': 'yyyy-mm-dd'
+            })
+            
+            # Create worksheet
+            worksheet = workbook.add_worksheet('KPI Dashboard')
+            
+            # Write title
+            worksheet.merge_range(0, 0, 0, 7, 'KPI Dashboard Scorecard', title_format)
+            worksheet.set_row(0, 30)
+            
+            # Write report period
+            worksheet.merge_range(1, 0, 1, 7, f'Report Period: {start_date.strftime("%Y-%m-%d")} to {end_date.strftime("%Y-%m-%d")}', cell_format)
+            worksheet.set_row(1, 25)
+            
+            row = 3
+            
+            # Process each program
+            for program_name, program_kpis in programs.items():
+                # Write program header
+                worksheet.merge_range(row, 0, row, 7, program_name, program_format)
+                worksheet.set_row(row, 25)
+                row += 1
+                
+                # Write KPI summary headers
+                headers = ["KPI Name", "Description", "Target", "Current Value", "Status", "Owner", "Last Updated", "Review Frequency"]
+                for col, header in enumerate(headers):
+                    worksheet.write(row, col, header, header_format)
+                row += 1
+                
+                # Write KPI summary data
+                for kpi in program_kpis:
+                    latest_metric = get_latest_metric(kpi["_id"])
+                    status = "On Target" if float(latest_metric.split()[0]) >= float(kpi.get("target", 0)) else "Off Target"
+                    
+                    worksheet.write(row, 0, kpi["name"], cell_format)
+                    worksheet.write(row, 1, kpi.get("description", "N/A"), cell_format)
+                    worksheet.write(row, 2, kpi.get("target", "N/A"), number_format)
+                    worksheet.write(row, 3, latest_metric.split()[0], number_format)
+                    worksheet.write(row, 4, status, cell_format)
+                    worksheet.write(row, 5, get_owner_name(kpi.get("user_id")), cell_format)
+                    worksheet.write(row, 6, get_latest_metric_date(kpi["_id"]), date_format)
+                    worksheet.write(row, 7, kpi.get("review_frequency", "Monthly"), cell_format)
+                    row += 1
+                
+                # Add space between programs
+                row += 2
+                
+                # Write updates for each KPI
+                for kpi in program_kpis:
+                    worksheet.merge_range(row, 0, row, 7, f"Update History - {kpi['name']}", kpi_format)
+                    worksheet.set_row(row, 25)
+                    row += 1
+                    
+                    # Write update headers
+                    update_headers = ["Date", "Value", "Comment", "Updated By"]
+                    for col, header in enumerate(update_headers):
+                        worksheet.write(row, col, header, header_format)
+                    row += 1
+                    
+                    # Write update data
+                    metrics = get_kpi_metrics(kpi["_id"], start_date, end_date)
+                    for metric in metrics:
+                        worksheet.write(row, 0, metric["date"].strftime("%Y-%m-%d"), date_format)
+                        worksheet.write(row, 1, str(metric["value"]), number_format)
+                        worksheet.write(row, 2, get_comment_for_metric(kpi["_id"], metric["date"]), cell_format)
+                        worksheet.write(row, 3, get_user_email(metric.get("user_id")), cell_format)
+                        row += 1
+                    
+                    row += 2  # Add space between KPIs
+                
+                row += 2  # Add space between programs
+            
+            # Set column widths
+            worksheet.set_column(0, 0, 20)  # KPI Name
+            worksheet.set_column(1, 1, 30)  # Description
+            worksheet.set_column(2, 2, 15)  # Target
+            worksheet.set_column(3, 3, 15)  # Current Value
+            worksheet.set_column(4, 4, 15)  # Status
+            worksheet.set_column(5, 5, 20)  # Owner
+            worksheet.set_column(6, 6, 15)  # Last Updated
+            worksheet.set_column(7, 7, 15)  # Review Frequency
+            
+            # Add autofilter to KPI summary sections
+            worksheet.autofilter(3, 0, row, 7)
+            
+            # Add print area and page setup
+            worksheet.print_area(0, 0, row, 7)
+            worksheet.set_landscape()
+            worksheet.set_paper(9)  # A4
+            worksheet.set_margins(0.5, 0.5, 0.5, 0.5)
+            worksheet.repeat_rows(0, 1)  # Repeat header row on each page
+        
+        output.seek(0)
+        return dcc.send_bytes(
+            output.getvalue(),
+            filename=f"KPI_Dashboard_Scorecard_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        )
+    
+    except Exception as e:
+        print(f"Error exporting report: {str(e)}")
+        raise PreventUpdate
 
 if __name__ == '__main__':
     app.run(
