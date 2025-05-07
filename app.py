@@ -29,10 +29,16 @@ load_dotenv()
 # Initialize Flask app
 server = Flask(__name__)
 server.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
-server.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+
+# Configure Neon PostgreSQL connection
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+server.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 server.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Initialize SQLAlchemy for PostgreSQL
+# Initialize SQLAlchemy
 db = SQLAlchemy(server)
 
 # Initialize MongoDB connection
@@ -63,6 +69,52 @@ app = Dash(__name__,
                'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css'
            ],
            suppress_callback_exceptions=True)
+
+# Initialize LoginManager
+login_manager = LoginManager()
+login_manager.init_app(server)
+login_manager.login_view = 'login'
+
+# User class for Flask-Login (using PostgreSQL)
+class User(UserMixin, db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+    role = db.Column(db.String(20), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __init__(self, email, password, role='user'):
+        self.email = email
+        self.password = password
+        self.role = role
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# Create admin user if not exists
+def create_admin_user():
+    admin_email = os.getenv('ADMIN_EMAIL')
+    admin_password = os.getenv('ADMIN_PASSWORD')
+    
+    if admin_email and admin_password:
+        admin = User.query.filter_by(email=admin_email).first()
+        if not admin:
+            hashed_password = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt())
+            admin = User(
+                email=admin_email,
+                password=hashed_password.decode('utf-8'),
+                role='admin'
+            )
+            db.session.add(admin)
+            db.session.commit()
+            print(f"Created admin user: {admin_email}")
+
+# Create database tables
+with server.app_context():
+    db.create_all()
+    create_admin_user()
 
 # Add custom CSS
 app.index_string = '''
@@ -118,52 +170,6 @@ app.index_string = '''
     </body>
 </html>
 '''
-
-# Initialize LoginManager
-login_manager = LoginManager()
-login_manager.init_app(server)
-login_manager.login_view = 'login'
-
-# User class for Flask-Login (using PostgreSQL)
-class User(UserMixin, db.Model):
-    __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password = db.Column(db.String(120), nullable=False)
-    role = db.Column(db.String(20), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def __init__(self, email, password, role='user'):
-        self.email = email
-        self.password = password
-        self.role = role
-
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
-
-# Create admin user if not exists
-def create_admin_user():
-    admin_email = os.getenv('ADMIN_EMAIL')
-    admin_password = os.getenv('ADMIN_PASSWORD')
-    
-    if admin_email and admin_password:
-        admin = User.query.filter_by(email=admin_email).first()
-        if not admin:
-            hashed_password = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt())
-            admin = User(
-                email=admin_email,
-                password=hashed_password.decode('utf-8'),
-                role='admin'
-            )
-            db.session.add(admin)
-            db.session.commit()
-            print(f"Created admin user: {admin_email}")
-
-# Create database tables
-with server.app_context():
-    db.create_all()
-    create_admin_user()
 
 # Add login required decorator
 def login_required_dash(f):
@@ -2649,7 +2655,7 @@ def get_cached_metrics(kpi_id):
     prevent_initial_call=True
 )
 def update_kpi_list(edit_clicks, delete_clicks, create_clicks, update_clicks, n_intervals,
-                    edit_id, name, description, category, target,
+                    edit_id, name, description, target,
                     delete_id, stored_data):
     ctx = dash.callback_context
     
