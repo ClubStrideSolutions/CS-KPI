@@ -1443,10 +1443,32 @@ def render_program_management():
     [Input({"type": "delete-program", "index": ALL}, "n_clicks"),
      Input("delete-program-close", "n_clicks"),
      Input("confirm-program-delete", "n_clicks")],
-    [State("delete-program-modal", "is_open")]
+    [State("delete-program-modal", "is_open")],
+    prevent_initial_call=True
 )
 def toggle_delete_program_modal(delete_clicks, close_click, confirm_click, is_open):
-    return toggle_modal(delete_clicks, "delete-program-close", "confirm-program-delete", is_open)
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+        
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
+    
+    if "delete-program-close" in trigger_prop or "confirm-program-delete" in trigger_prop:
+        return False, ""
+        
+    if not any(delete_clicks):
+        raise PreventUpdate
+    
+    # Find which button was clicked
+    for i, clicks in enumerate(delete_clicks):
+        if clicks:
+            button_id = ctx.inputs_list[0][i]["id"]
+            if isinstance(button_id, dict) and "index" in button_id:
+                item_id = button_id["index"]
+                return True, item_id
+    
+    raise PreventUpdate
 
 # Update the program management callback
 @app.callback(
@@ -1593,19 +1615,7 @@ def get_latest_metric(kpi_id):
         print(f"Error getting latest metric: {str(e)}")
         return "Error"
 
-def get_latest_comment(kpi_id):
-    """Helper function to get the latest comment for a KPI"""
-    try:
-        latest_history = mongo_db.kpi_history.find_one(
-            {"kpi_id": str(kpi_id)},
-            sort=[("date", -1)]
-        )
-        if latest_history and latest_history.get("comment"):
-            return latest_history["comment"]
-        return "No comments"
-    except Exception as e:
-        print(f"Error getting latest comment: {str(e)}")
-        return "Error"
+
 
 def get_owner_name(user_id):
     """Helper function to get user name from ID"""
@@ -2006,22 +2016,25 @@ def toggle_edit_program_modal(edit_clicks, close_click, save_click, is_open):
     if not ctx.triggered:
         raise PreventUpdate
         
-    trigger_id = ctx.triggered[0]["prop_id"]
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
     
-    if "edit-program-close" in trigger_id or "save-program-edit" in trigger_id:
+    if "edit-program-close" in trigger_prop or "save-program-edit" in trigger_prop:
         return False, "", "", ""
         
     if not any(edit_clicks):
         raise PreventUpdate
-        
+    
     # Find which button was clicked
     for i, clicks in enumerate(edit_clicks):
         if clicks:
-            item_id = edit_clicks[i]["id"]["index"]
-            program = mongo_db.programs.find_one({"_id": ObjectId(item_id)})
-            if program:
-                return True, program["name"], program.get("description", ""), item_id
-            
+            button_id = ctx.inputs_list[0][i]["id"]
+            if isinstance(button_id, dict) and "index" in button_id:
+                item_id = button_id["index"]
+                program = mongo_db.programs.find_one({"_id": ObjectId(item_id)})
+                if program:
+                    return True, program["name"], program.get("description", ""), item_id
+    
     raise PreventUpdate
 
 # Add user management page
@@ -2121,43 +2134,89 @@ def render_user_management():
         ], id="delete-user-modal", is_open=False)
     ])
 
-# Add callback to handle delete user modal
+# Remove all existing delete user modal callbacks and replace with this single one
 @app.callback(
-    [Output("delete-user-modal", "is_open"),
-     Output("delete-user-id", "value"),
-     Output("user-table-container", "children")],  # Updated ID here
+    [Output("delete-user-modal", "is_open", allow_duplicate=True),
+     Output("delete-user-id", "value", allow_duplicate=True)],
     [Input({"type": "delete-user", "index": ALL}, "n_clicks"),
      Input("delete-user-close", "n_clicks"),
      Input("confirm-delete-user", "n_clicks")],
-    [State("delete-user-modal", "is_open"),
+    [State("delete-user-modal", "is_open")],
+    prevent_initial_call=True
+)
+def handle_delete_user_modal(delete_clicks, close_click, confirm_click, is_open):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+        
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
+    
+    if "delete-user-close" in trigger_prop or "confirm-delete-user" in trigger_prop:
+        return False, ""
+        
+    if not any(delete_clicks):
+        raise PreventUpdate
+    
+    # Find which button was clicked
+    for i, clicks in enumerate(delete_clicks):
+        if clicks:
+            button_id = ctx.inputs_list[0][i]["id"]
+            if isinstance(button_id, dict) and "index" in button_id:
+                item_id = button_id["index"]
+                return True, item_id
+    
+    raise PreventUpdate
+
+@app.callback(
+    Output("user-table-container", "children"),
+    [Input("create-user-button", "n_clicks"),
+     Input("confirm-reset-password", "n_clicks"),
+     Input("confirm-delete-user", "n_clicks")],
+    [State("new-user-email", "value"),
+     State("new-user-password", "value"),
+     State("new-user-role", "value"),
      State("delete-user-id", "value")],
     prevent_initial_call=True
 )
-def toggle_delete_user_modal(delete_clicks, close_click, confirm_click, is_open, user_id):
-    return toggle_modal(delete_clicks, "delete-user-close", "confirm-delete-user", is_open)
-
-# Update user list callback to handle other actions
-@app.callback(
-    Output("user-table-container", "children", allow_duplicate=True),  # Updated ID here
-    [Input("create-user-button", "n_clicks"),
-     Input("confirm-reset-password", "n_clicks"),
-     Input("interval-component", "n_intervals")],
-    [State("reset-password-user-id", "value")],
-    prevent_initial_call=True
-)
-def update_user_list(create_clicks, reset_clicks, n_intervals, reset_user_id):
+def update_user_list(create_clicks, reset_clicks, delete_clicks, email, password, role, delete_user_id):
     ctx = dash.callback_context
     if not ctx.triggered:
         return create_user_table(User.query.all())
     
     trigger_id = ctx.triggered[0]["prop_id"]
     
-    if "confirm-reset-password" in trigger_id and reset_clicks:
-        # Password reset handled in separate callback
-        pass
-    
-    # Return updated user list
-    return create_user_table(User.query.all())
+    try:
+        if "confirm-delete-user" in trigger_id and delete_clicks and delete_user_id:
+            # Delete the user
+            user = User.query.get(int(delete_user_id))
+            if user:
+                db.session.delete(user)
+                db.session.commit()
+        elif "create-user-button" in trigger_id and create_clicks:
+            if not email or not password:
+                return create_user_table(User.query.all())
+            
+            # Check if email already exists
+            existing_user = User.query.filter_by(email=email).first()
+            if existing_user:
+                return create_user_table(User.query.all())
+            
+            # Create new user
+            hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+            new_user = User(
+                email=email,
+                password=hashed_password.decode('utf-8'),
+                role=role
+            )
+            db.session.add(new_user)
+            db.session.commit()
+        
+        # Return updated user list
+        return create_user_table(User.query.all())
+    except Exception as e:
+        print(f"Error in update_user_list: {str(e)}")
+        return create_user_table(User.query.all())
 
 def create_user_table(users):
     """Create a table displaying all users"""
@@ -2199,70 +2258,103 @@ def create_user_table(users):
 
 # Add callback to handle reset password modal
 @app.callback(
-    [Output("reset-password-modal", "is_open"),
-     Output("reset-password-user-id", "value"),
-     Output("reset-password-input", "value"),
-     Output("reset-password-confirm", "value")],
+    [Output("reset-password-modal", "is_open", allow_duplicate=True),
+     Output("reset-password-user-id", "value", allow_duplicate=True)],
     [Input({"type": "reset-password", "index": ALL}, "n_clicks"),
      Input("reset-password-close", "n_clicks"),
      Input("confirm-reset-password", "n_clicks")],
-    [State("reset-password-modal", "is_open"),
-     State("reset-password-input", "value"),
+    [State("reset-password-modal", "is_open")],
+    prevent_initial_call=True
+)
+def toggle_reset_password_modal(reset_clicks, close_click, confirm_click, is_open):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+        
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
+    
+    if "reset-password-close" in trigger_prop or "confirm-reset-password" in trigger_prop:
+        return False, ""
+        
+    if not any(reset_clicks):
+        raise PreventUpdate
+    
+    # Find which button was clicked
+    for i, clicks in enumerate(reset_clicks):
+        if clicks:
+            button_id = ctx.inputs_list[0][i]["id"]
+            if isinstance(button_id, dict) and "index" in button_id:
+                item_id = button_id["index"]
+                return True, item_id
+    
+    raise PreventUpdate
+
+@app.callback(
+    [Output("reset-password-modal", "is_open", allow_duplicate=True),
+     Output("reset-password-input", "value"),
+     Output("reset-password-confirm", "value")],
+    [Input("confirm-reset-password", "n_clicks")],
+    [State("reset-password-input", "value"),
      State("reset-password-confirm", "value"),
      State("reset-password-user-id", "value")],
     prevent_initial_call=True
 )
-def toggle_reset_password_modal(reset_clicks, close_click, confirm_click, is_open, new_password, confirm_password, user_id):
-    return toggle_modal(reset_clicks, "reset-password-close", "confirm-reset-password", is_open)
+def handle_password_reset(confirm_clicks, new_password, confirm_password, user_id):
+    if not confirm_clicks:
+        raise PreventUpdate
+        
+    try:
+        if not new_password or not confirm_password:
+            return True, new_password, confirm_password
+            
+        if new_password != confirm_password:
+            return True, new_password, confirm_password
+            
+        user = User.query.get(int(user_id))
+        if user:
+            hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+            user.password = hashed_password.decode('utf-8')
+            db.session.commit()
+            
+        return False, "", ""
+    except Exception as e:
+        print(f"Error resetting password: {str(e)}")
+        return True, new_password, confirm_password
 
-# Add callback for creating new users
 @app.callback(
-    [Output("create-user-message", "children"),
-     Output("new-user-email", "value"),
-     Output("new-user-password", "value"),
-     Output("user-table-container", "children", allow_duplicate=True)],
-    [Input("create-user-button", "n_clicks")],
-    [State("new-user-email", "value"),
-     State("new-user-password", "value"),
-     State("new-user-role", "value")],
+    [Output("delete-user-modal", "is_open"),
+     Output("delete-user-id", "value")],
+    [Input({"type": "delete-user", "index": ALL}, "n_clicks"),
+     Input("delete-user-close", "n_clicks"),
+     Input("confirm-delete-user", "n_clicks")],
+    [State("delete-user-modal", "is_open")],
     prevent_initial_call=True
 )
-def create_user(n_clicks, email, password, role):
-    if not n_clicks:
+def handle_delete_user_modal(delete_clicks, close_click, confirm_click, is_open):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+        
+    trigger = ctx.triggered[0]
+    trigger_prop = trigger["prop_id"]
+    
+    if "delete-user-close" in trigger_prop or "confirm-delete-user" in trigger_prop:
+        return False, ""
+        
+    if not any(delete_clicks):
         raise PreventUpdate
     
-    if not email or not password:
-        return html.Div("Please fill in all fields", className="text-danger"), no_update, no_update, no_update
+    # Find which button was clicked
+    for i, clicks in enumerate(delete_clicks):
+        if clicks:
+            button_id = ctx.inputs_list[0][i]["id"]
+            if isinstance(button_id, dict) and "index" in button_id:
+                item_id = button_id["index"]
+                return True, item_id
     
-    try:
-        # Check if email already exists
-        existing_user = User.query.filter_by(email=email).first()
-        if existing_user:
-            return html.Div("Email already registered", className="text-danger"), no_update, no_update, no_update
-        
-        # Hash password and create user
-        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        new_user = User(
-            email=email,
-            password=hashed_password.decode('utf-8'),
-            role=role
-        )
-        db.session.add(new_user)
-        db.session.commit()
-        
-        # Return success message and clear form
-        return (
-            html.Div("User created successfully!", className="text-success"),
-            "",  # Clear email
-            "",  # Clear password
-            create_user_table(User.query.all())  # Update user table
-        )
-    
-    except Exception as e:
-        print(f"Error creating user: {str(e)}")
-        return html.Div(f"Error creating user: {str(e)}", className="text-danger"), no_update, no_update, no_update
+    raise PreventUpdate
 
-# Update the edit modal callback
 @app.callback(
     [Output("edit-kpi-modal", "is_open", allow_duplicate=True),
      Output("edit-kpi-id", "value", allow_duplicate=True),
@@ -2661,8 +2753,7 @@ def update_kpi_list(edit_clicks, delete_clicks, create_clicks, update_clicks, n_
      Input("save-kpi-edit", "n_clicks")],
     [State("edit-kpi-modal", "is_open")]
 )
-def toggle_edit_modal(edit_clicks, close_click, save_click, is_open):
-    return toggle_modal(edit_clicks, "edit-modal-close", "save-kpi-edit", is_open)
+
 
 @app.callback(
     [Output("delete-kpi-modal", "is_open"),
@@ -2684,33 +2775,18 @@ def toggle_delete_modal(delete_clicks, close_click, confirm_click, is_open):
     [State("delete-program-modal", "is_open")],
     prevent_initial_call=True
 )
-def toggle_delete_program_modal(delete_clicks, close_click, confirm_click, is_open):
-    return toggle_modal(delete_clicks, "delete-program-close", "confirm-program-delete", is_open)
 
-@app.callback(
-    [Output("delete-user-modal", "is_open", allow_duplicate=True),
-     Output("delete-user-id", "value", allow_duplicate=True)],
-    [Input({"type": "delete-user", "index": ALL}, "n_clicks"),
-     Input("delete-user-close", "n_clicks"),
-     Input("confirm-delete-user", "n_clicks")],
-    [State("delete-user-modal", "is_open")],
-    prevent_initial_call=True
-)
-def toggle_delete_user_modal(delete_clicks, close_click, confirm_click, is_open):
-    return toggle_modal(delete_clicks, "delete-user-close", "confirm-delete-user", is_open)
-
-@app.callback(
-    [Output("reset-password-modal", "is_open", allow_duplicate=True),
-     Output("reset-password-user-id", "value", allow_duplicate=True)],
-    [Input({"type": "reset-password", "index": ALL}, "n_clicks"),
-     Input("reset-password-close", "n_clicks"),
-     Input("confirm-reset-password", "n_clicks")],
-    [State("reset-password-modal", "is_open")],
-    prevent_initial_call=True
-)
-def toggle_reset_password_modal(reset_clicks, close_click, confirm_click, is_open):
-    return toggle_modal(reset_clicks, "reset-password-close", "confirm-reset-password", is_open)
-
+# @app.callback(
+#     [Output("reset-password-modal", "is_open", allow_duplicate=True),
+#      Output("reset-password-user-id", "value", allow_duplicate=True)],
+#     [Input({"type": "reset-password", "index": ALL}, "n_clicks"),
+#      Input("reset-password-close", "n_clicks"),
+#      Input("confirm-reset-password", "n_clicks")],
+#     [State("reset-password-modal", "is_open")],
+#     prevent_initial_call=True
+# )
+# def toggle_reset_password_modal(reset_clicks, close_click, confirm_click, is_open, new_password, confirm_password, user_id):
+#     return toggle_modal(reset_clicks, "reset-password-close", "confirm-reset-password", is_open)
 # Add a generic modal toggle function
 def toggle_modal(trigger_id, close_id, confirm_id, is_open, modal_id="", data_id=""):
     """Generic function to handle modal toggling"""
